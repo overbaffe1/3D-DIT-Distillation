@@ -15,14 +15,6 @@ errors: []
 notes: []
 
 Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (21.2 KB)
-/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/library.py:508: UserWarning: Warning only once for all operators,  other operators may also be overridden.
-  Overriding a previously registered kernel for the same operator and the same dispatch key
-  operator: _c10d_functional::wait_tensor(Tensor tensor) -> Tensor
-    registered at /__w/pytorch/pytorch/torch/csrc/distributed/c10d/Functional.cpp:553
-  dispatch key: Autograd
-  previous kernel: registered at /__w/pytorch/pytorch/torch/csrc/distributed/c10d/Functional.cpp:553
-       new kernel: registered at /opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/library.py:1012 (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
-  self.m.impl(
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=[]
@@ -34,101 +26,20 @@ Traceback (most recent call last):
     from lib.fast_kernels import preload_extensions
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/__init__.py", line 7, in <module>
     from lib.fast_flow import OptimizedLatDitRunner
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 13, in <module>
-    import base_models.sparse as sp
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/sparse.py", line 729, in <module>
-    @torch.compile()
-     ^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/__init__.py", line 3218, in fn
-    return compile(  # pyrefly: ignore  # no-matching-overload
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/__init__.py", line 3280, in compile
-    return torch._dynamo.optimize(
-           ^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/__init__.py", line 3404, in __getattr__
-    return importlib.import_module(f".{name}", __name__)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/importlib/__init__.py", line 126, in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/__init__.py", line 13, in <module>
-    from . import (
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/aot_compile.py", line 17, in <module>
-    from torch._dynamo.convert_frame import GraphRuntimeEnv
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/convert_frame.py", line 62, in <module>
-    from torch._dynamo.symbolic_convert import TensorifyState
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/symbolic_convert.py", line 65, in <module>
-    from . import (
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/trace_rules.py", line 60, in <module>
-    from .variables import (
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/variables/__init__.py", line 19, in <module>
-    from .base import VariableTracker
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/variables/base.py", line 3329, in <module>
-    from . import builder
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/variables/builder.py", line 132, in <module>
-    from ..side_effects import SideEffects
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/side_effects.py", line 39, in <module>
-    from torch._dynamo.variables.misc import AutogradFunctionContextVariable
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/variables/misc.py", line 41, in <module>
-    from torch._dynamo.variables.lists import TupleVariable
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/variables/lists.py", line 64, in <module>
-    from .functions import UserFunctionVariable
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/variables/functions.py", line 109, in <module>
-    from torch.distributed.fsdp._fully_shard import _fsdp_param_group
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/fsdp/__init__.py", line 1, in <module>
-    from ._flat_param import FlatParameter as FlatParameter
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/fsdp/_flat_param.py", line 33, in <module>
-    from ._fsdp_extensions import (
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/fsdp/_fsdp_extensions.py", line 8, in <module>
-    from torch.distributed.fsdp._shard_utils import (
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/fsdp/_shard_utils.py", line 17, in <module>
-    from torch.distributed.tensor import DeviceMesh, DTensor, Replicate, Shard as DShard
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/tensor/__init__.py", line 4, in <module>
-    import torch.distributed.tensor._ops  # force import all built-in dtensor ops
-    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/tensor/_ops/__init__.py", line 2, in <module>
-    from ._conv_ops import *  # noqa: F403
-    ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/tensor/_ops/_conv_ops.py", line 8, in <module>
-    from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/tensor/_dtensor_spec.py", line 10, in <module>
-    from torch.distributed.tensor.placement_types import (
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/tensor/placement_types.py", line 12, in <module>
-    import torch.distributed._functional_collectives as funcol
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/distributed/_functional_collectives.py", line 1329, in <module>
-    @torch.library.custom_op(
-     ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 249, in inner
-    result = CustomOpDef(namespace, opname, schema_str, fn, normalized_tags)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 310, in __init__
-    self._register_to_dispatcher(self._tags)
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 751, in _register_to_dispatcher
-    self._register_fake_dispatcher_impl()
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_library/custom_ops.py", line 787, in _register_fake_dispatcher_impl
-    self._lib._register_fake(self._name, fake_impl, _stacklevel=5)
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/library.py", line 333, in _register_fake
-    source = torch._library.utils.get_source(_stacklevel + 1)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_library/utils.py", line 45, in get_source
-    frame = inspect.getframeinfo(sys._getframe(stacklevel))
-            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/inspect.py", line 1688, in getframeinfo
-    lines, lnum = findsource(frame)
-                  ^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/inspect.py", line 1071, in findsource
-    module = getmodule(object, file)
-             ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/inspect.py", line 994, in getmodule
-    f = getabsfile(module)
-        ^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/inspect.py", line 963, in getabsfile
-    _filename = getsourcefile(object) or getfile(object)
-                ^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/inspect.py", line 939, in getsourcefile
-    if any(filename.endswith(s) for s in all_bytecode_suffixes):
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/inspect.py", line 939, in <genexpr>
-    if any(filename.endswith(s) for s in all_bytecode_suffixes):
-           ^^^^^^^^^^^^^^^^^
-AttributeError: type object '__file__' has no attribute 'endswith'
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 16, in <module>
+    from kandi3d_image23d.models.modeling_lat_dit import LatDitModel
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/__init__.py", line 8, in <module>
+    from kandi3d_image23d.lat_dit_stage import LatDitStage, LatDitStageOutput
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/lat_dit_stage.py", line 12, in <module>
+    from kandi3d_image23d.models.modeling_lat_vae import LatVaeModel
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/models/__init__.py", line 1, in <module>
+    from kandi3d_image23d.models.modeling_lat_dit import LatDitModel
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/models/modeling_lat_dit.py", line 16, in <module>
+    from kandi3d_image23d.modules.lat_dit.core import LatDitCore
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/modules/lat_dit/__init__.py", line 1, in <module>
+    from kandi3d_image23d.modules.lat_dit.core import LatDitCore
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/modules/lat_dit/core.py", line 19, in <module>
+    from models.generators.lat_dit import FlowModel, SimpleTransformerBlock
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/models/generators/lat_dit.py", line 12, in <module>
+    from flash_attn.ops.activations import swiglu
+ModuleNotFoundError: No module named 'flash_attn'
