@@ -71,6 +71,14 @@ def _discover_weights_dir(primary_path: Path) -> Path:
                 return cand
             if _has_model_weights(cand / "lat_dit"):
                 return cand / "lat_dit"
+        elif arg == "--lat-vae-dir" and i + 1 < len(argv):
+            cand = Path(argv[i + 1]).expanduser().resolve().parent / "lat_dit"
+            if _has_model_weights(cand):
+                return cand
+        elif arg.startswith("--lat-vae-dir="):
+            cand = Path(arg.split("=", 1)[1]).expanduser().resolve().parent / "lat_dit"
+            if _has_model_weights(cand):
+                return cand
 
     for env_key in ("LAT_DIT_DIR", "LAT_DIT_WEIGHTS_DIR", "KANDI3D_WEIGHTS_DIR"):
         env_val = os.environ.get(env_key)

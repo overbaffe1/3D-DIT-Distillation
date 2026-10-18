@@ -40,6 +40,7 @@ def build_submission_zip(
     root_dir: Path,
     output_zip: Path,
     external_lat_dit_dir: Path | None = None,
+    include_weights_always: bool = False,
 ) -> Path:
     output_zip = output_zip.expanduser().resolve()
     output_zip.parent.mkdir(parents=True, exist_ok=True)
@@ -49,10 +50,22 @@ def build_submission_zip(
         raise FileNotFoundError(f"Missing {solution_py}")
 
     weights_dir = root_dir / "weights"
-    if not weights_dir.is_dir():
-        raise FileNotFoundError(f"Missing {weights_dir}")
-
     lib_dir = root_dir / "lib"
+
+    has_binary_weights = False
+    if weights_dir.is_dir():
+        for fname in (
+            "diffusion_pytorch_model.safetensors",
+            "diffusion_pytorch_model.bin",
+            "model.safetensors",
+            "adapter_deltas.safetensors",
+            "adapter_deltas.pt",
+        ):
+            if (weights_dir / fname).is_file():
+                has_binary_weights = True
+                break
+
+    include_weights = include_weights_always or has_binary_weights or (external_lat_dit_dir is not None)
 
     with zipfile.ZipFile(output_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         # 1. solution.py
@@ -65,13 +78,16 @@ def build_submission_zip(
                     rel = p.relative_to(root_dir).as_posix()
                     zf.write(p, arcname=rel)
 
-        # 3. weights/
+        # 3. weights/ (only included when actual model/adapter binary weights are present,
+        # so that when submitting a lightweight archive without 7.8 GB weights,
+        # run_lat_dit_eval.py automatically passes organizer --lat-dit-dir to Solution.from_pretrained)
         added_weights = set()
-        for p in sorted(weights_dir.rglob("*")):
-            if p.is_file() and "__pycache__" not in p.parts and not p.name.startswith("."):
-                rel = p.relative_to(root_dir).as_posix()
-                zf.write(p, arcname=rel)
-                added_weights.add(p.name)
+        if include_weights and weights_dir.is_dir():
+            for p in sorted(weights_dir.rglob("*")):
+                if p.is_file() and "__pycache__" not in p.parts and not p.name.startswith("."):
+                    rel = p.relative_to(root_dir).as_posix()
+                    zf.write(p, arcname=rel)
+                    added_weights.add(p.name)
 
         # 4. Optionally bundle model weights from --lat-dit-dir if not already in weights/
         if external_lat_dit_dir is not None:

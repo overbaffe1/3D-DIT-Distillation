@@ -45,8 +45,13 @@ class SolverConfig:
             if "rescale_t" in fallback_model_cfg:
                 cfg.rescale_t = float(fallback_model_cfg["rescale_t"])
 
+        # Load from lib/solver_config.json first, then override with weights_dir/solver_config.json if present
+        lib_sc_path = Path(__file__).resolve().parent / "solver_config.json"
+        candidate_paths = [lib_sc_path]
         if weights_dir is not None:
-            sc_path = Path(weights_dir) / "solver_config.json"
+            candidate_paths.append(Path(weights_dir) / "solver_config.json")
+
+        for sc_path in candidate_paths:
             if sc_path.is_file():
                 with open(sc_path, encoding="utf-8") as f:
                     data = json.load(f)
