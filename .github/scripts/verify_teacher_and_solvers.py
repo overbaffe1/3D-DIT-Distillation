@@ -55,7 +55,7 @@ def stream_block0_weights():
                 block0_items = [
                     (k, v)
                     for k, v in header.items()
-                    if k.startswith("flow.blocks.0.") and v["data_offsets"][1] <= 175_000_000
+                    if k.startswith("flow.blocks.0.") and v["data_offsets"][1] <= 50_000_000
                 ]
                 block0_items.sort(key=lambda x: x[1]["data_offsets"][0])
                 cur_offset = 0
@@ -87,8 +87,15 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     block0_tensors, block0_stats = stream_block0_weights()
-    with open(out_dir / "weights_stats.json", "w", encoding="utf-8") as f:
-        json.dump(block0_stats, f, indent=2)
+    stats_file = out_dir / "weights_stats.json"
+    if stats_file.is_file():
+        with open(stats_file, encoding="utf-8") as f:
+            merged_stats = json.load(f)
+        merged_stats.update(block0_stats)
+    else:
+        merged_stats = block0_stats
+    with open(stats_file, "w", encoding="utf-8") as f:
+        json.dump(merged_stats, f, indent=2)
 
     with open(ROOT / "weights" / "config.json", encoding="utf-8") as f:
         raw_cfg = json.load(f)
@@ -129,7 +136,7 @@ def main():
         sol_model = Solution.from_pretrained(tmp_weights, device="cpu")
 
         # Load real sample from public_test
-        sample_dir = ROOT / "fetched_info" / "sample_test_data" / "public_test" / "0029d9fc39fa4c1d9eae4fd370f6f8cd" / "cache"
+        sample_dir = ROOT / "fetched_info" / "sample_test_data" / "public_test" / "22a9a0954ea14062b20dc3f826081811" / "cache"
         vox_np = np.load(sample_dir / "vox_idxi.npz")["vox_idxi"][:384]
         dino_np = np.load(sample_dir / "4view_000_dinov3.npz")["feats"]
         vox_t = torch.tensor(vox_np, dtype=torch.int32)

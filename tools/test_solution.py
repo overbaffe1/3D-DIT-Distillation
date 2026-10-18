@@ -108,7 +108,7 @@ def test_pytorch_pipeline() -> None:
         sol_model = Solution.from_pretrained(tmp_path, device=device)
 
         # Load real sample coordinates and DINO features from fetched_info
-        sample_dir = _ROOT / "fetched_info" / "sample_test_data" / "public_test" / "0029d9fc39fa4c1d9eae4fd370f6f8cd" / "cache"
+        sample_dir = _ROOT / "fetched_info" / "sample_test_data" / "public_test" / "22a9a0954ea14062b20dc3f826081811" / "cache"
         if sample_dir.is_dir():
             vox_np = np.load(sample_dir / "vox_idxi.npz")["vox_idxi"][:512]
             dino_np = np.load(sample_dir / "4view_000_dinov3.npz")["feats"]
