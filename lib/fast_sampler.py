@@ -13,16 +13,16 @@ import torch
 
 @dataclass
 class SolverConfig:
-    num_inference_steps: int = 14
-    n_guided_steps: int = 10
+    num_inference_steps: int = 16
+    n_guided_steps: int = 12
     n_unguided_steps: int = 4
     guidance_scale: float = 7.0
     cfg_range: Tuple[float, float] = (0.5, 1.0)
     rescale_t: float = 3.0
     solver_type: str = "piecewise_ab2"  # "euler" | "piecewise_euler" | "piecewise_ab2"
-    ab2_max_ratio: float = 0.45
-    cfg_stride: int = 2
-    cfg_cache_mode: str = "delta_extrapolate"  # "exact" | "delta_reuse" | "delta_extrapolate" | "neg_reuse"
+    ab2_max_ratio: float = 0.35
+    cfg_stride: int = 1
+    cfg_cache_mode: str = "exact"  # "exact" | "delta_reuse" | "delta_extrapolate" | "neg_reuse"
     cfg_extrapolation_alpha: float = 0.35
     uncond_1token_condensation: bool = True
     cache_cond_block7_stride: int = 1
