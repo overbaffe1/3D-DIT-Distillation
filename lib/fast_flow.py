@@ -577,7 +577,11 @@ class OptimizedLatDitRunner:
         generator: Optional[torch.Generator] = None,
     ) -> List[torch.Tensor]:
         # Fallback if non-standard architecture flags are used
-        if self.flow.io_conv or self.flow.patchify.patch_size != 1 or self.flow.pos_conv:
+        if (
+            self.flow.io_conv
+            or self.flow.patchify.patch_size != 1
+            or getattr(self.flow.blocks[0], "use_pos_conv", False)
+        ):
             return self.core.sample_sparse(
                 vox_idxs, conditioning, sampling=sampling, generator=generator
             )
