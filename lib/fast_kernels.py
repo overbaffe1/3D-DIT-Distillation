@@ -48,6 +48,7 @@ def install_cpu_fallbacks() -> None:
     if torch.cuda.is_available():
         return
 
+    import importlib.machinery
     import importlib.util
     import sys
     import types
@@ -74,9 +75,14 @@ def install_cpu_fallbacks() -> None:
     ):
         if mod_name not in sys.modules:
             top = mod_name.split(".")[0]
-            if importlib.util.find_spec(top) is None:
+            try:
+                spec = importlib.util.find_spec(top) if top not in sys.modules else getattr(sys.modules[top], "__spec__", None)
+            except Exception:
+                spec = None
+            if spec is None or isinstance(sys.modules.get(top), _DummyModule):
                 m = _DummyModule(mod_name)
                 m.__path__ = []
+                m.__spec__ = importlib.machinery.ModuleSpec(mod_name, None, is_package=True)
                 sys.modules[mod_name] = m
 
     try:
