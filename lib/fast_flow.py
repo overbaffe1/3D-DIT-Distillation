@@ -135,6 +135,10 @@ class OptimizedLatDitRunner:
             # Pre-slice weights for 1-token unconditional condensation:
             # In to_qkv_cross ([3*D, D]), slice [D:3*D] is K,V only (skipping Q on N voxels!)
             if block.cond:
+                block._to_q_cross_w = block.to_qkv_cross.weight[:D, :].contiguous()
+                block._to_q_cross_b = (
+                    block.to_qkv_cross.bias[:D].contiguous() if block.to_qkv_cross.bias is not None else None
+                )
                 block._to_kv_cross_w = block.to_qkv_cross.weight[D:, :].contiguous()
                 block._to_kv_cross_b = (
                     block.to_qkv_cross.bias[D:].contiguous() if block.to_qkv_cross.bias is not None else None
@@ -391,6 +395,7 @@ class OptimizedLatDitRunner:
             cond = context.to(dtype=compute_dtype)
 
         ln_cond_after_7: Optional[torch.Tensor] = None
+        kv_cc_cache_out: Optional[List[torch.Tensor]] = [] if return_cond_block7 else None
         use_triton = self.solver_config.use_fused_triton_kernels
 
         for b_idx, block in enumerate(self.flow.blocks):
@@ -450,8 +455,18 @@ class OptimizedLatDitRunner:
                     cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
 
                 elif cached_cond_block7 is not None:
-                    # When cond block 7 is cached from previous step, only update x via cross-attn
-                    pass
+                    # Reuse cached K,V of conditioning from previous step; only compute Q_x and x->cond cross-attn!
+                    h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                    q_w = getattr(block, "_to_q_cross_w", None)
+                    if q_w is not None:
+                        q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                    else:
+                        q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
+                    kv_cc = cached_cond_block7[b_idx]
+                    h_x_out = flash_cross_attn(
+                        q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
+                    )
+                    x = x + fast_gate(block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
                 else:
                     L = cond.shape[1]
                     h_cond = fast_modulate_cond(cond, cs_msa, csh_msa)
@@ -468,28 +483,29 @@ class OptimizedLatDitRunner:
                     cond = cond + block.cond_to_out(h_cond.reshape(batch_size, L, D)) * cg_msa[:, None]
 
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
-                    q_x, k_x, v_x = block.to_qkv_cross(h_x).view(N, 3, H, HD).unbind(dim=-3)
+                    qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
 
                     h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
-                    q_cc, k_cc, v_cc = (
-                        block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD).unbind(dim=-3)
-                    )
+                    qkv_cc_cr = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)
+                    kv_cc = qkv_cc_cr[:, 1:]
+                    if kv_cc_cache_out is not None:
+                        kv_cc_cache_out.append(kv_cc)
 
                     h_x_out = flash_cross_attn(
-                        q_x,
+                        qkv_x_cr[:, 0],
                         q_seqlens,
                         q_maxlen,
-                        torch.stack([k_cc, v_cc], dim=-3),
+                        kv_cc,
                         kv_seqlens_full,
                         kv_maxlen_full,
                     )
                     x = x + fast_gate(block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
 
                     h_c_out = flash_cross_attn(
-                        q_cc,
+                        qkv_cc_cr[:, 0],
                         kv_seqlens_full,
                         kv_maxlen_full,
-                        torch.stack([k_x, v_x], dim=-3),
+                        qkv_x_cr[:, 1:],
                         q_seqlens,
                         q_maxlen,
                     )
@@ -499,29 +515,38 @@ class OptimizedLatDitRunner:
                     hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
                     cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
 
-                if b_idx == self.cond_depth - 1:
-                    if not uncond and cached_cond_block7 is not None:
-                        cond = cached_cond_block7
+                if b_idx == self.cond_depth - 1 and cached_cond_block7 is None:
                     ln_cond_after_7 = fast_layer_norm(cond)
 
             else:
                 cs_cr, csh_cr = cond_gates[b_idx]
-                h_cond_cr = ln_cond_after_7 * (1.0 + cs_cr[:, None]) + csh_cr[:, None]
 
                 if use_1tok_uncond:
                     # Exact 1-token cross-attn in blocks 8..23:
                     # Skips modulate(x), to_q_cross(x), FlashAttention, and N-voxel to_out_cross!
+                    h_cond_cr = ln_cond_after_7 * (1.0 + cs_cr[:, None]) + csh_cr[:, None]
                     v_w = getattr(block, "_cond_to_v_cross_w", None)
                     if v_w is not None:
                         v_cc = F.linear(h_cond_cr, v_w, getattr(block, "_cond_to_v_cross_b", None)).view(1, D)
                     else:
                         v_cc = block.cond_to_kv_cross(h_cond_cr).view(1, 2, D)[:, 1]
                     x = x + fast_gate(block.to_out_cross(v_cc), sizes, g_cr)
+                elif cached_cond_block7 is not None:
+                    h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                    q_x = block.to_q_cross(h_x).view(N, H, HD)
+                    kv_cc = cached_cond_block7[b_idx]
+                    h_x_out = flash_cross_attn(
+                        q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
+                    )
+                    x = x + fast_gate(block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
                 else:
                     L = cond.shape[1]
+                    h_cond_cr = ln_cond_after_7 * (1.0 + cs_cr[:, None]) + csh_cr[:, None]
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
                     kv_cc = block.cond_to_kv_cross(h_cond_cr).view(batch_size * L, 2, H, HD)
+                    if kv_cc_cache_out is not None:
+                        kv_cc_cache_out.append(kv_cc)
                     h_x_out = flash_cross_attn(
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
                     )
@@ -543,7 +568,7 @@ class OptimizedLatDitRunner:
         out = F.linear(x, self.flow.unpatchify.weight.to(dtype=x.dtype)).float()
 
         if return_cond_block7:
-            return out, cond
+            return out, kv_cc_cache_out
         return out
 
     @torch.no_grad()
