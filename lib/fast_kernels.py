@@ -87,6 +87,44 @@ def install_cpu_fallbacks() -> None:
                 m.__spec__ = importlib.machinery.ModuleSpec(mod_name, None, is_package=True)
                 sys.modules[mod_name] = m
 
+    class _StubSparseConvTensor:
+        def __init__(
+            self,
+            features,
+            indices,
+            spatial_shape=None,
+            batch_size=None,
+            grid=None,
+            voxel_num=None,
+            indice_dict=None,
+            benchmark=False,
+            **kwargs,
+        ):
+            self._features = features
+            self.indices = indices
+            self.spatial_shape = spatial_shape
+            self.batch_size = batch_size
+            self.grid = grid
+            self.voxel_num = voxel_num
+            self.indice_dict = indice_dict if indice_dict is not None else {}
+            self.benchmark = benchmark
+            self.benchmark_record = {}
+            self.thrust_allocator = None
+            self._timer = None
+            self.force_algo = None
+            self.int8_scale = None
+
+        @property
+        def features(self):
+            return self._features
+
+        @features.setter
+        def features(self, val):
+            self._features = val
+
+    if "spconv.pytorch" in sys.modules and isinstance(sys.modules["spconv.pytorch"], _DummyModule):
+        sys.modules["spconv.pytorch"].SparseConvTensor = _StubSparseConvTensor
+
     if "flash_attn" not in sys.modules:
         def _fa_varlen_qkvpacked_cpu(qkv, cu_seqlens, max_seqlen, *args, **kwargs):
             N, _, H, HD = qkv.shape
