@@ -30,19 +30,23 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install remotezip requests numpy safetensors torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install remotezip requests numpy safetensors einops
 
       - name: Build and verify submission and run unit tests
         run: |
-          python3 tools/build_submission.py
-          python3 tools/test_solution.py
+          set -eo pipefail
+          mkdir -p fetched_info
+          python3 tools/build_submission.py 2>&1 | tee fetched_info/ci_run.log
+          python3 tools/test_solution.py 2>&1 | tee -a fetched_info/ci_run.log
 
       - name: Run teacher verification and solver benchmark
         run: |
-          python3 .github/scripts/verify_teacher_and_solvers.py
+          set -eo pipefail
+          python3 .github/scripts/verify_teacher_and_solvers.py 2>&1 | tee -a fetched_info/ci_run.log
 
       - name: Commit and push results
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
