@@ -271,28 +271,59 @@ def install_cpu_fallbacks() -> None:
     try:
         import ops.sparse as ops_sparse
 
-        _orig_build_idx = ops_sparse.build_conv_idx
-        _orig_conv_fn = ops_sparse.conv_func
+        _orig_get_idx = ops_sparse.get_conv_indices
+        _orig_conv = ops_sparse.conv
 
-        def _build_conv_idx_fallback(pos: torch.Tensor) -> torch.Tensor:
+        def _get_conv_indices_fallback(pos: torch.Tensor) -> torch.Tensor:
             if pos.is_cuda and _LIBSPARSE is not None:
-                return _orig_build_idx(pos)
+                return _orig_get_idx(pos)
             return build_conv_indices_fast(pos)
 
-        def _conv_func_fallback(
+        def _conv_fallback(
             feat: torch.Tensor,
-            indices: torch.Tensor,
+            pos: torch.Tensor,
             weight: torch.Tensor,
             bias: Optional[torch.Tensor] = None,
+            indices: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
             if feat.is_cuda and _LIBSPARSE is not None:
-                return _orig_conv_fn(feat, indices, weight, bias)
+                return _orig_conv(feat, pos, weight, bias, indices=indices)
+            if indices is None:
+                indices = build_conv_indices_fast(pos)
             w_fp32 = weight.float().contiguous()
             b_fp32 = bias.float().contiguous() if bias is not None else torch.zeros(weight.shape[-1], device=feat.device)
             return fast_sparse_conv3d(feat, w_fp32, b_fp32, indices)
 
-        ops_sparse.build_conv_idx = _build_conv_idx_fallback
-        ops_sparse.conv_func = _conv_func_fallback
+        ops_sparse.get_conv_indices = _get_conv_indices_fallback
+        ops_sparse.conv = _conv_fallback
+    except Exception:
+        pass
+
+    try:
+        import ops.rope as ops_rope
+        import models.generators.lat_dit as gen_lat_dit
+
+        def _rope_nd_cpu(x: torch.Tensor, pos: torch.Tensor, freq: float = 100.0) -> torch.Tensor:
+            B, N, H, K = x.shape
+            D = pos.shape[-1]
+            M = K // (2 * D)
+            inv_freq = float(freq) ** (-torch.arange(M, dtype=torch.float64, device=x.device) / float(M))
+            out_chunks = []
+            for d in range(D):
+                angles = pos[:, :, d : d + 1].to(torch.float64) * inv_freq.view(1, 1, M)
+                c = torch.cos(angles).to(x.dtype).unsqueeze(2)
+                s = torch.sin(angles).to(x.dtype).unsqueeze(2)
+                xd = x[:, :, :, d * 2 * M : (d + 1) * 2 * M]
+                u = xd[..., :M]
+                v = xd[..., M:]
+                out_chunks.append(u * c - v * s)
+                out_chunks.append(u * s + v * c)
+            if 2 * D * M < K:
+                out_chunks.append(x[..., 2 * D * M :])
+            return torch.cat(out_chunks, dim=-1)
+
+        ops_rope.rope_nd = _rope_nd_cpu
+        gen_lat_dit.rope_nd = _rope_nd_cpu
     except Exception:
         pass
 
