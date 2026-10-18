@@ -146,9 +146,10 @@ def install_cpu_fallbacks() -> None:
     try:
         import base_models.order as order_mod
 
-        _orig_z = order_mod.encode_z_order
-        _orig_h = order_mod.encode_hilbert_order
-        _orig_x = order_mod.encode_x_order
+        _orig_z = order_mod.encode_z
+        _orig_h = order_mod.encode_hilbert
+        _orig_x = order_mod.encode_xor
+        _orig_b = order_mod.assign_batch_index
 
         def _cpu_split_by_3(a: torch.Tensor) -> torch.Tensor:
             w = a.to(torch.int64) & 0x1FFFFF
@@ -159,87 +160,73 @@ def install_cpu_fallbacks() -> None:
             w = (w | (w << 2)) & 0x1249249249249249
             return w
 
-        def _encode_z_cpu(coords: torch.Tensor, depth: int = 16, perm: int = 0) -> torch.Tensor:
-            if coords.is_cuda:
-                return _orig_z(coords, depth=depth, perm=perm)
-            b = coords[:, 0].to(torch.int64)
-            x, y, z = coords[:, 1], coords[:, 2], coords[:, 3]
-            if perm == 1:
-                x, y, z = y, z, x
-            elif perm == 2:
-                x, y, z = z, x, y
-            elif perm == 3:
-                x, y, z = x, z, y
-            elif perm == 4:
-                x, y, z = y, x, z
-            elif perm == 5:
-                x, y, z = z, y, x
-            code = (_cpu_split_by_3(x) << 2) | (_cpu_split_by_3(y) << 1) | _cpu_split_by_3(z)
-            return (b << (3 * depth)) | code
+        def _encode_z_cpu(xyz: torch.Tensor, convention: str = "xyz", assign_batch_index: bool = True) -> torch.Tensor:
+            if xyz.is_cuda:
+                return _orig_z(xyz, convention=convention, assign_batch_index=assign_batch_index)
+            convention = convention.lower()
+            x_off, y_off, z_off = convention.find("x"), convention.find("y"), convention.find("z")
+            bx = xyz[:, 0].to(torch.int64)
+            x = xyz[:, 1 + x_off].to(torch.int64)
+            y = xyz[:, 1 + y_off].to(torch.int64)
+            z = xyz[:, 1 + z_off].to(torch.int64)
+            ret = (_cpu_split_by_3(x) << 2) | (_cpu_split_by_3(y) << 1) | _cpu_split_by_3(z)
+            if assign_batch_index:
+                ret = ret | (bx << 48)
+            return ret
 
-        def _encode_hilbert_cpu(coords: torch.Tensor, depth: int = 16, perm: int = 0) -> torch.Tensor:
-            if coords.is_cuda:
-                return _orig_h(coords, depth=depth, perm=perm)
-            b = coords[:, 0].to(torch.int64)
-            x = coords[:, 1].to(torch.int64).clone()
-            y = coords[:, 2].to(torch.int64).clone()
-            z = coords[:, 3].to(torch.int64).clone()
-            if perm == 1:
-                x, y, z = y, z, x
-            elif perm == 2:
-                x, y, z = z, x, y
-            elif perm == 3:
-                x, y, z = x, z, y
-            elif perm == 4:
-                x, y, z = y, x, z
-            elif perm == 5:
-                x, y, z = z, y, x
-            m = 1 << (depth - 1)
-            q = m
-            while q > 1:
+        def _encode_hilbert_cpu(xyz: torch.Tensor, convention: str = "xyz", assign_batch_index: bool = True) -> torch.Tensor:
+            if xyz.is_cuda:
+                return _orig_h(xyz, convention=convention, assign_batch_index=assign_batch_index)
+            convention = convention.lower()
+            x_off, y_off, z_off = convention.find("x"), convention.find("y"), convention.find("z")
+            bx = xyz[:, 0].to(torch.int64)
+            x = xyz[:, 1 + x_off].to(torch.int64).clone()
+            y = xyz[:, 1 + y_off].to(torch.int64).clone()
+            z = xyz[:, 1 + z_off].to(torch.int64).clone()
+            for i in range(15, 0, -1):
+                q = 1 << i
                 p = q - 1
-                x = torch.where((x & q) != 0, x ^ p, x)
+                x = torch.where((x & q) > 0, x ^ p, x)
+                cond = (y & q) > 0
                 t = (x ^ y) & p
-                x = x ^ torch.where((y & q) != 0, p, t)
-                y = y ^ torch.where((y & q) != 0, torch.zeros_like(t), t)
+                x = x ^ torch.where(cond, torch.full_like(t, p), t)
+                y = y ^ torch.where(cond, torch.zeros_like(t), t)
+                cond = (z & q) > 0
                 t = (x ^ z) & p
-                x = x ^ torch.where((z & q) != 0, p, t)
-                z = z ^ torch.where((z & q) != 0, torch.zeros_like(t), t)
-                q >>= 1
+                x = x ^ torch.where(cond, torch.full_like(t, p), t)
+                z = z ^ torch.where(cond, torch.zeros_like(t), t)
             y ^= x
             z ^= y
             t = torch.zeros_like(z)
-            q = m
-            while q > 1:
-                t_step = torch.where((z & q) != 0, torch.full_like(z, q - 1), torch.zeros_like(z))
-                t = t ^ t_step
-                q >>= 1
+            for i in range(15, 0, -1):
+                q = 1 << i
+                t = t ^ torch.where((z & q) > 0, torch.full_like(z, q - 1), torch.zeros_like(z))
             x ^= t
             y ^= t
             z ^= t
-            code = (_cpu_split_by_3(x) << 2) | (_cpu_split_by_3(y) << 1) | _cpu_split_by_3(z)
-            return (b << (3 * depth)) | code
+            ret = (_cpu_split_by_3(x) << 2) | (_cpu_split_by_3(y) << 1) | _cpu_split_by_3(z)
+            if assign_batch_index:
+                ret = ret | (bx << 48)
+            return ret
 
-        def _encode_x_cpu(coords: torch.Tensor, depth: int = 16, perm: int = 0) -> torch.Tensor:
-            if coords.is_cuda:
-                return _orig_x(coords, depth=depth, perm=perm)
-            b = coords[:, 0].to(torch.int64)
-            x, y, z = coords[:, 1].to(torch.int64), coords[:, 2].to(torch.int64), coords[:, 3].to(torch.int64)
-            if perm == 1:
-                x, y, z = y, z, x
-            elif perm == 2:
-                x, y, z = z, x, y
-            elif perm == 3:
-                x, y, z = x, z, y
-            elif perm == 4:
-                x, y, z = y, x, z
-            elif perm == 5:
-                x, y, z = z, y, x
-            return (b << (3 * depth)) | (x << (2 * depth)) | (y << depth) | z
+        def _encode_xor_cpu(xyz: torch.Tensor, assign_batch_index: bool = True) -> torch.Tensor:
+            if xyz.is_cuda:
+                return _orig_x(xyz, assign_batch_index=assign_batch_index)
+            bx = xyz[:, 0].to(torch.int64)
+            ret = xyz[:, 1].to(torch.int64) ^ xyz[:, 2].to(torch.int64) ^ xyz[:, 3].to(torch.int64)
+            if assign_batch_index:
+                ret = ret | (bx << 48)
+            return ret
 
-        order_mod.encode_z_order = _encode_z_cpu
-        order_mod.encode_hilbert_order = _encode_hilbert_cpu
-        order_mod.encode_x_order = _encode_x_cpu
+        def _assign_batch_index_cpu(code: torch.Tensor, batch_idx: torch.Tensor) -> torch.Tensor:
+            if code.is_cuda:
+                return _orig_b(code, batch_idx)
+            return code | (batch_idx.to(torch.int64) << 48)
+
+        order_mod.encode_z = _encode_z_cpu
+        order_mod.encode_hilbert = _encode_hilbert_cpu
+        order_mod.encode_xor = _encode_xor_cpu
+        order_mod.assign_batch_index = _assign_batch_index_cpu
     except Exception:
         pass
 
