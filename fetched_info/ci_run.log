@@ -24,14 +24,12 @@ Traceback (most recent call last):
     test_pytorch_pipeline()
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 63, in test_pytorch_pipeline
     from lib.fast_kernels import preload_extensions
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/__init__.py", line 4, in <module>
-    from lib.fast_flow import OptimizedLatDitRunner
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 13, in <module>
-    import base_models.sparse as sp
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/sparse.py", line 15, in <module>
-    SparseTensorData = importlib.import_module(
-                       ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/importlib/__init__.py", line 126, in import_module
-    return _bootstrap._gcd_import(name[level:], package, level)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ModuleNotFoundError: No module named 'spconv'
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/__init__.py", line 5, in <module>
+    preload_extensions(verbose=False)
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_kernels.py", line 251, in preload_extensions
+    install_cpu_fallbacks()
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_kernels.py", line 77, in install_cpu_fallbacks
+    if importlib.util.find_spec(top) is None:
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib.util>", line 115, in find_spec
+ValueError: spconv.__spec__ is None
