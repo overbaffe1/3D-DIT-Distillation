@@ -24,6 +24,10 @@ for _p in (_THIS_DIR, _THIS_DIR / "lib", _THIS_DIR / "baseline_repo" / "3dgen-ma
     if _p.is_dir() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from lib.fast_kernels import preload_extensions
+
+preload_extensions(verbose=False)
+
 from kandi3d_image23d import LatDitConditioning, LatDitGenerator
 from kandi3d_image23d.configs.lat_dit_config import LatDitConfig
 from kandi3d_image23d.modeling_utils import normalize_state_dict
@@ -31,7 +35,6 @@ from kandi3d_image23d.models.modeling_lat_dit import LatDitModel, _config_to_ini
 from kandi3d_image23d.runtime import FlowMatchSamplingParams, resolve
 
 from lib.fast_flow import OptimizedLatDitRunner
-from lib.fast_kernels import preload_extensions
 from lib.fast_sampler import SolverConfig
 
 

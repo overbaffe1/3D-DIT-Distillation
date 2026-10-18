@@ -20,6 +20,9 @@ for p in (
     if p.is_dir() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+from lib.fast_kernels import preload_extensions
+preload_extensions(verbose=False)
+
 import base_models.sparse as sp
 from kandi3d_image23d import LatDitConditioning
 from kandi3d_image23d.configs.lat_dit_config import LatDitConfig

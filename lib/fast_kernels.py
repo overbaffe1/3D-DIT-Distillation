@@ -48,6 +48,37 @@ def install_cpu_fallbacks() -> None:
     if torch.cuda.is_available():
         return
 
+    import importlib.util
+    import sys
+    import types
+
+    class _DummyModule(types.ModuleType):
+        def __getattr__(self, name: str):
+            val = type(name, (), {})
+            setattr(self, name, val)
+            return val
+
+    for mod_name in (
+        "spconv",
+        "spconv.pytorch",
+        "nvdiffrast",
+        "nvdiffrast.torch",
+        "torch_scatter",
+        "torch_cluster",
+        "igl",
+        "mapbox_earcut",
+        "sklearn",
+        "sklearn.neighbors",
+        "torchvision",
+        "torchvision.transforms",
+    ):
+        if mod_name not in sys.modules:
+            top = mod_name.split(".")[0]
+            if importlib.util.find_spec(top) is None:
+                m = _DummyModule(mod_name)
+                m.__path__ = []
+                sys.modules[mod_name] = m
+
     try:
         import base_models.order as order_mod
 
