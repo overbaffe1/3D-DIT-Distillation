@@ -21,10 +21,17 @@ Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-D
    [PASS] Submission format verified.
 2. Testing Solution class contract & numerical equivalence...
 Traceback (most recent call last):
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 170, in <module>
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/ops/rope.py", line 14, in _init
+    import librope as _curope
+ModuleNotFoundError: No module named 'librope'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 175, in <module>
     test_pytorch_pipeline()
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 134, in test_pytorch_pipeline
-    ref_pos = ref_model.core.flow(xt_sparse, t_tensor, context.float(), clf_tok.float()).feats
+    ref_pos = ref_model.core.flow(xt_sparse, t_tensor, clf_tok.float(), context.float()).feats
               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1783, in _wrapped_call_impl
     return self._call_impl(*args, **kwargs)
@@ -41,7 +48,33 @@ Traceback (most recent call last):
   File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1794, in _call_impl
     return forward_call(*args, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/models/generators/lat_dit.py", line 558, in forward
-    assert cond_size * cond_size == cond.shape[1] - 5
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/models/generators/lat_dit.py", line 577, in forward
+    feats, cond = self._forward(
+                  ^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/models/generators/lat_dit.py", line 524, in _forward
+    return self.__forward(
+           ^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/models/generators/lat_dit.py", line 400, in __forward
+    q, k = rope_nd(q[None,], pos[None,], freq=128)[0], rope_nd(k[None,], pos[None,], freq=128)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/_dynamo/eval_frame.py", line 1548, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/ops/rope.py", line 50, in rope_nd
+    if not _init():
+           ^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/ops/rope.py", line 16, in _init
+    _curope = custom_ops.load_ext(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/ops/custom_ops.py", line 25, in load_ext
+    f"{hash_md5.hexdigest()}-{re.sub('[^0-9a-zA-Z]+', '-', torch.cuda.get_device_name().lower())}",
+                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/cuda/__init__.py", line 766, in get_device_name
+    return get_device_properties(device).name
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/cuda/__init__.py", line 799, in get_device_properties
+    _lazy_init()  # will define _get_device_properties
+    ^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/cuda/__init__.py", line 584, in _lazy_init
+    raise AssertionError("Torch not compiled with CUDA enabled")
+AssertionError: Torch not compiled with CUDA enabled
