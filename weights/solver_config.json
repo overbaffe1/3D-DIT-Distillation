@@ -1,0 +1,21 @@
+{
+  "num_inference_steps": 14,
+  "n_guided_steps": 10,
+  "n_unguided_steps": 4,
+  "guidance_scale": 7.0,
+  "cfg_range": [0.5, 1.0],
+  "rescale_t": 3.0,
+  "solver_type": "piecewise_ab2",
+  "ab2_max_ratio": 0.45,
+  "cfg_stride": 2,
+  "cfg_cache_mode": "delta_extrapolate",
+  "cfg_extrapolation_alpha": 0.35,
+  "uncond_1token_condensation": true,
+  "cache_cond_block7_stride": 1,
+  "precompute_static_geometry": true,
+  "precompute_rope_tables": true,
+  "precompute_time_gates": true,
+  "use_fused_triton_kernels": true,
+  "use_bf16_weights": true,
+  "warmup_on_load": true
+}

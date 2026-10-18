@@ -1,43 +1,50 @@
 name: Fetch Baseline and Inspect Data
 
 on:
+  workflow_dispatch:
   push:
     branches:
-      - arena/8f28ae4f-3d-dit-distillation
-    paths:
-      - '.github/scripts/verify_teacher_and_solvers.py'
-      - '.github/workflows/fetch_baseline.yml'
+      - "arena/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
-  fetch:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: arena/8f28ae4f-3d-dit-distillation
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install --index-url https://download.pytorch.org/whl/cpu torch numpy && pip install remotezip requests
+        run: |
+          pip install --upgrade pip
+          pip install remotezip requests numpy safetensors torch --index-url https://download.pytorch.org/whl/cpu
+          pip install remotezip requests numpy safetensors einops
+
+      - name: Build and verify submission and run unit tests
+        run: |
+          python3 tools/build_submission.py
+          python3 tools/test_solution.py
 
       - name: Run teacher verification and solver benchmark
-        run: python -u .github/scripts/verify_teacher_and_solvers.py
+        run: |
+          python3 .github/scripts/verify_teacher_and_solvers.py
 
       - name: Commit and push results
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add fetched_info
-          git status
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: save teacher weight stats and solver benchmark results"
-            git push origin arena/8f28ae4f-3d-dit-distillation
-          fi
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add fetched_info/ submission.zip
+          git diff --cached --quiet || (git commit -m "ci: record teacher weight stats, solver benchmark, and verified submission.zip [skip ci]" && git push origin HEAD:${GITHUB_REF_NAME})
