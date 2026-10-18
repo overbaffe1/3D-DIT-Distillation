@@ -14,32 +14,44 @@ weights_dir: None
 errors: []
 notes: []
 
-Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (21.2 KB)
+Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (21.5 KB)
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=[]
    [PASS] Submission format verified.
+2. Testing Solution class contract & numerical equivalence...
 Traceback (most recent call last):
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 170, in <module>
     test_pytorch_pipeline()
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 63, in test_pytorch_pipeline
-    from lib.fast_kernels import preload_extensions
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/__init__.py", line 7, in <module>
-    from lib.fast_flow import OptimizedLatDitRunner
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 16, in <module>
-    from kandi3d_image23d.models.modeling_lat_dit import LatDitModel
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/__init__.py", line 8, in <module>
-    from kandi3d_image23d.lat_dit_stage import LatDitStage, LatDitStageOutput
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/lat_dit_stage.py", line 12, in <module>
-    from kandi3d_image23d.models.modeling_lat_vae import LatVaeModel
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/models/__init__.py", line 1, in <module>
-    from kandi3d_image23d.models.modeling_lat_dit import LatDitModel
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/models/modeling_lat_dit.py", line 16, in <module>
-    from kandi3d_image23d.modules.lat_dit.core import LatDitCore
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/modules/lat_dit/__init__.py", line 1, in <module>
-    from kandi3d_image23d.modules.lat_dit.core import LatDitCore
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/modules/lat_dit/core.py", line 19, in <module>
-    from models.generators.lat_dit import FlowModel, SimpleTransformerBlock
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/models/generators/lat_dit.py", line 12, in <module>
-    from flash_attn.ops.activations import swiglu
-ModuleNotFoundError: No module named 'flash_attn'
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 127, in test_pytorch_pipeline
+    geom = sol_model.runner._prepare_sample_geometry([vox_t], context)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 285, in _prepare_sample_geometry
+    fwd_idx, bwd_idx, cu_seqlens, max_len = calc_order_partition(
+                                            ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/order.py", line 323, in calc_order_partition
+    code = encode(coords, mode)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/order.py", line 297, in encode
+    return encode_hilbert(xyz, "xyz")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/order.py", line 108, in encode_hilbert
+    _encode_hilbert_kernel[grid](
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/jit.py", line 374, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/jit.py", line 731, in run
+    device = driver.active.get_current_device()
+             ^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/driver.py", line 39, in active
+    self._active = self.default
+                   ^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/driver.py", line 33, in default
+    self._default = _create_driver()
+                    ^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/driver.py", line 20, in _create_driver
+    raise RuntimeError(f"{len(active_drivers)} active drivers ({active_drivers}). There should only be one.")
+RuntimeError: 0 active drivers ([]). There should only be one.
