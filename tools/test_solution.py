@@ -66,7 +66,10 @@ def test_pytorch_pipeline() -> None:
     from kandi3d_image23d.models.modeling_lat_dit import LatDitModel, _config_to_init_kwargs
     from kandi3d_image23d.runtime import FlowMatchSamplingParams
     from solution import Solution
+    from lib.fast_kernels import preload_extensions
     from lib.fast_sampler import SolverConfig
+
+    preload_extensions(verbose=False)
 
     print("2. Testing Solution class contract & numerical equivalence...")
     assert issubclass(Solution, LatDitGenerator), "Solution must subclass LatDitGenerator"

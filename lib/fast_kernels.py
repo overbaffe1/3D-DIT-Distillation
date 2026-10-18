@@ -38,10 +38,186 @@ def get_cached_ones(dim: int, device: torch.device, dtype: torch.dtype) -> torch
     return t
 
 
+def install_cpu_fallbacks() -> None:
+    """
+    When running on a CPU-only machine (e.g., CI testing without CUDA/flash_attn),
+    provide exact PyTorch CPU fallbacks for `base_models.order`, `ops.sparse`,
+    and `flash_attn` so both baseline `LatDitModel` and `Solution` can execute on CPU.
+    Does NOT modify anything when CUDA is available.
+    """
+    if torch.cuda.is_available():
+        return
+
+    try:
+        import base_models.order as order_mod
+
+        _orig_z = order_mod.encode_z_order
+        _orig_h = order_mod.encode_hilbert_order
+        _orig_x = order_mod.encode_x_order
+
+        def _cpu_split_by_3(a: torch.Tensor) -> torch.Tensor:
+            w = a.to(torch.int64) & 0x1FFFFF
+            w = (w | (w << 32)) & 0x001F00000000FFFF
+            w = (w | (w << 16)) & 0x001F0000FF0000FF
+            w = (w | (w << 8)) & 0x010F00F00F00F00F
+            w = (w | (w << 4)) & 0x10C30C30C30C30C3
+            w = (w | (w << 2)) & 0x1249249249249249
+            return w
+
+        def _encode_z_cpu(coords: torch.Tensor, depth: int = 16, perm: int = 0) -> torch.Tensor:
+            if coords.is_cuda:
+                return _orig_z(coords, depth=depth, perm=perm)
+            b = coords[:, 0].to(torch.int64)
+            x, y, z = coords[:, 1], coords[:, 2], coords[:, 3]
+            if perm == 1:
+                x, y, z = y, z, x
+            elif perm == 2:
+                x, y, z = z, x, y
+            elif perm == 3:
+                x, y, z = x, z, y
+            elif perm == 4:
+                x, y, z = y, x, z
+            elif perm == 5:
+                x, y, z = z, y, x
+            code = (_cpu_split_by_3(x) << 2) | (_cpu_split_by_3(y) << 1) | _cpu_split_by_3(z)
+            return (b << (3 * depth)) | code
+
+        def _encode_hilbert_cpu(coords: torch.Tensor, depth: int = 16, perm: int = 0) -> torch.Tensor:
+            if coords.is_cuda:
+                return _orig_h(coords, depth=depth, perm=perm)
+            b = coords[:, 0].to(torch.int64)
+            x = coords[:, 1].to(torch.int64).clone()
+            y = coords[:, 2].to(torch.int64).clone()
+            z = coords[:, 3].to(torch.int64).clone()
+            if perm == 1:
+                x, y, z = y, z, x
+            elif perm == 2:
+                x, y, z = z, x, y
+            elif perm == 3:
+                x, y, z = x, z, y
+            elif perm == 4:
+                x, y, z = y, x, z
+            elif perm == 5:
+                x, y, z = z, y, x
+            m = 1 << (depth - 1)
+            q = m
+            while q > 1:
+                p = q - 1
+                x = torch.where((x & q) != 0, x ^ p, x)
+                t = (x ^ y) & p
+                x = x ^ torch.where((y & q) != 0, p, t)
+                y = y ^ torch.where((y & q) != 0, torch.zeros_like(t), t)
+                t = (x ^ z) & p
+                x = x ^ torch.where((z & q) != 0, p, t)
+                z = z ^ torch.where((z & q) != 0, torch.zeros_like(t), t)
+                q >>= 1
+            y ^= x
+            z ^= y
+            t = torch.zeros_like(z)
+            q = m
+            while q > 1:
+                t_step = torch.where((z & q) != 0, torch.full_like(z, q - 1), torch.zeros_like(z))
+                t = t ^ t_step
+                q >>= 1
+            x ^= t
+            y ^= t
+            z ^= t
+            code = (_cpu_split_by_3(x) << 2) | (_cpu_split_by_3(y) << 1) | _cpu_split_by_3(z)
+            return (b << (3 * depth)) | code
+
+        def _encode_x_cpu(coords: torch.Tensor, depth: int = 16, perm: int = 0) -> torch.Tensor:
+            if coords.is_cuda:
+                return _orig_x(coords, depth=depth, perm=perm)
+            b = coords[:, 0].to(torch.int64)
+            x, y, z = coords[:, 1].to(torch.int64), coords[:, 2].to(torch.int64), coords[:, 3].to(torch.int64)
+            if perm == 1:
+                x, y, z = y, z, x
+            elif perm == 2:
+                x, y, z = z, x, y
+            elif perm == 3:
+                x, y, z = x, z, y
+            elif perm == 4:
+                x, y, z = y, x, z
+            elif perm == 5:
+                x, y, z = z, y, x
+            return (b << (3 * depth)) | (x << (2 * depth)) | (y << depth) | z
+
+        order_mod.encode_z_order = _encode_z_cpu
+        order_mod.encode_hilbert_order = _encode_hilbert_cpu
+        order_mod.encode_x_order = _encode_x_cpu
+    except Exception:
+        pass
+
+    try:
+        import ops.sparse as ops_sparse
+
+        _orig_build_idx = ops_sparse.build_conv_idx
+        _orig_conv_fn = ops_sparse.conv_func
+
+        def _build_conv_idx_fallback(pos: torch.Tensor) -> torch.Tensor:
+            if pos.is_cuda and _LIBSPARSE is not None:
+                return _orig_build_idx(pos)
+            return build_conv_indices_fast(pos)
+
+        def _conv_func_fallback(
+            feat: torch.Tensor,
+            indices: torch.Tensor,
+            weight: torch.Tensor,
+            bias: Optional[torch.Tensor] = None,
+        ) -> torch.Tensor:
+            if feat.is_cuda and _LIBSPARSE is not None:
+                return _orig_conv_fn(feat, indices, weight, bias)
+            w_fp32 = weight.float().contiguous()
+            b_fp32 = bias.float().contiguous() if bias is not None else torch.zeros(weight.shape[-1], device=feat.device)
+            return fast_sparse_conv3d(feat, w_fp32, b_fp32, indices)
+
+        ops_sparse.build_conv_idx = _build_conv_idx_fallback
+        ops_sparse.conv_func = _conv_func_fallback
+    except Exception:
+        pass
+
+    try:
+        import base_models.sparse as bm_sparse
+        import models.generators.lat_dit as gen_lat_dit
+
+        if getattr(gen_lat_dit, "flash_attn_varlen_qkvpacked_func", None) is None:
+
+            def _fa_varlen_qkvpacked_cpu(qkv, cu_seqlens, max_seqlen, *args, **kwargs):
+                N, _, H, HD = qkv.shape
+                out = torch.empty((N, H, HD), device=qkv.device, dtype=qkv.dtype)
+                seqlens = cu_seqlens.tolist()
+                for i in range(len(seqlens) - 1):
+                    s, e = seqlens[i], seqlens[i + 1]
+                    if e > s:
+                        q_i = qkv[s:e, 0].transpose(0, 1).unsqueeze(0)
+                        k_i = qkv[s:e, 1].transpose(0, 1).unsqueeze(0)
+                        v_i = qkv[s:e, 2].transpose(0, 1).unsqueeze(0)
+                        o_i = F.scaled_dot_product_attention(q_i, k_i, v_i)
+                        out[s:e] = o_i.squeeze(0).transpose(0, 1)
+                return out
+
+            def _fa_qkvpacked_cpu(qkv, *args, **kwargs):
+                q = qkv[:, :, 0].transpose(1, 2)
+                k = qkv[:, :, 1].transpose(1, 2)
+                v = qkv[:, :, 2].transpose(1, 2)
+                return F.scaled_dot_product_attention(q, k, v).transpose(1, 2).contiguous()
+
+            def _fa_varlen_kvpacked_cpu(q, kv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, *args, **kwargs):
+                return flash_cross_attn(q, cu_seqlens_q, max_seqlen_q, kv, cu_seqlens_k, max_seqlen_k)
+
+            bm_sparse.flash_attn_varlen_qkvpacked_func = _fa_varlen_qkvpacked_cpu
+            gen_lat_dit.flash_attn_varlen_qkvpacked_func = _fa_varlen_qkvpacked_cpu
+            gen_lat_dit.flash_attn_qkvpacked_func = _fa_qkvpacked_cpu
+            gen_lat_dit.flash_attn_varlen_kvpacked_func = _fa_varlen_kvpacked_cpu
+    except Exception:
+        pass
+
+
 def preload_extensions(verbose: bool = False) -> None:
     """Pre-load CUDA/Triton extensions at model load time so zero JIT happens during generate()."""
     global _FLASH_ATTN, _FLASH_ATTN_3, _TRITON_LN, _TRITON_RMS, _SWIGLU_FN, _LIBSPARSE, _CUROPE
 
+    install_cpu_fallbacks()
     if not torch.cuda.is_available():
         return
 

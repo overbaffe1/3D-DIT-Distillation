@@ -90,7 +90,7 @@ class OptimizedLatDitRunner:
     def _compute_dtype(self, device: torch.device) -> torch.dtype:
         if device.type == "cuda":
             return torch.bfloat16
-        return torch.bfloat16 if self.solver_config.use_bf16_weights else torch.float32
+        return torch.float32
 
     def _prepare_weights_and_buffers(self) -> None:
         """

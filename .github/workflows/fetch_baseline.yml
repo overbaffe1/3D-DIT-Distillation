@@ -31,7 +31,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install remotezip requests numpy safetensors einops
+          pip install remotezip requests numpy safetensors einops triton transformers diffusers omegaconf trimesh pandas
 
       - name: Build and verify submission and run unit tests
         run: |
