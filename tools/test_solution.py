@@ -165,7 +165,7 @@ def test_pytorch_pipeline() -> None:
             assert out_latents[0].shape == (len(vox_t), 16)
             assert torch.isfinite(out_latents[0]).all()
             meta = sol_model.last_run_metadata
-            assert meta is not None and "wall_seconds" in meta and "generator_class" in meta
+            assert meta is not None and "elapsed_seconds" in meta and meta.get("status") == "ok"
             print(f"   generate() output shape={tuple(out_latents[0].shape)}, metadata={meta}")
             print("   [PASS] PyTorch pipeline & numerical equivalence verified.")
 
