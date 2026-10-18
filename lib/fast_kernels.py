@@ -55,6 +55,8 @@ def install_cpu_fallbacks() -> None:
 
     class _DummyModule(types.ModuleType):
         def __getattr__(self, name: str):
+            if name.startswith("__"):
+                raise AttributeError(name)
             val = type(name, (), {})
             setattr(self, name, val)
             return val
