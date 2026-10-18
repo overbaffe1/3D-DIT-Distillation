@@ -25,24 +25,7 @@ Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-D
 Traceback (most recent call last):
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 175, in <module>
     test_pytorch_pipeline()
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 158, in test_pytorch_pipeline
-    out_latents = sol_model.generate(
-                  ^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/lat_dit_protocol.py", line 118, in generate
-    result = self.generate_impl(
-             ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/solution.py", line 233, in generate_impl
-    return self.runner.sample_fast(
-           ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 580, in sample_fast
-    if self.flow.io_conv or self.flow.patchify.patch_size != 1 or self.flow.pos_conv:
-                                                                  ^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1972, in __getattr__
-    raise AttributeError(
-AttributeError: 'FlowModel' object has no attribute 'pos_conv'. Did you mean: 'io_conv'?
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 168, in test_pytorch_pipeline
+    assert meta is not None and "wall_seconds" in meta and "generator_class" in meta
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
