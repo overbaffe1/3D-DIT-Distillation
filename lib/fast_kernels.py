@@ -87,6 +87,62 @@ def install_cpu_fallbacks() -> None:
                 m.__spec__ = importlib.machinery.ModuleSpec(mod_name, None, is_package=True)
                 sys.modules[mod_name] = m
 
+    if "flash_attn" not in sys.modules:
+        def _fa_varlen_qkvpacked_cpu(qkv, cu_seqlens, max_seqlen, *args, **kwargs):
+            N, _, H, HD = qkv.shape
+            out = torch.empty((N, H, HD), device=qkv.device, dtype=qkv.dtype)
+            seqlens = cu_seqlens.tolist()
+            for i in range(len(seqlens) - 1):
+                s, e = seqlens[i], seqlens[i + 1]
+                if e > s:
+                    q_i = qkv[s:e, 0].transpose(0, 1).unsqueeze(0)
+                    k_i = qkv[s:e, 1].transpose(0, 1).unsqueeze(0)
+                    v_i = qkv[s:e, 2].transpose(0, 1).unsqueeze(0)
+                    o_i = F.scaled_dot_product_attention(q_i, k_i, v_i)
+                    out[s:e] = o_i.squeeze(0).transpose(0, 1)
+            return out
+
+        def _fa_qkvpacked_cpu(qkv, *args, **kwargs):
+            q = qkv[:, :, 0].transpose(1, 2)
+            k = qkv[:, :, 1].transpose(1, 2)
+            v = qkv[:, :, 2].transpose(1, 2)
+            return F.scaled_dot_product_attention(q, k, v).transpose(1, 2).contiguous()
+
+        def _fa_varlen_kvpacked_cpu(q, kv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, *args, **kwargs):
+            return flash_cross_attn(q, cu_seqlens_q, max_seqlen_q, kv, cu_seqlens_k, max_seqlen_k)
+
+        def _fa_swiglu(gate, y):
+            return F.silu(gate) * y
+
+        def _fa_layer_norm(x, weight, bias, eps=1e-6):
+            return F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
+
+        def _fa_rms_norm(x, weight, bias=None, eps=1e-6):
+            return F.rms_norm(x, (x.shape[-1],), weight, eps)
+
+        for mname in (
+            "flash_attn",
+            "flash_attn.ops",
+            "flash_attn.ops.activations",
+            "flash_attn.ops.layer_norm",
+            "flash_attn.ops.rms_norm",
+            "flash_attn.ops.triton",
+            "flash_attn.ops.triton.layer_norm",
+        ):
+            mod = types.ModuleType(mname)
+            mod.__path__ = []
+            mod.__spec__ = importlib.machinery.ModuleSpec(mname, None, is_package=True)
+            sys.modules[mname] = mod
+
+        sys.modules["flash_attn"].flash_attn_varlen_qkvpacked_func = _fa_varlen_qkvpacked_cpu
+        sys.modules["flash_attn"].flash_attn_qkvpacked_func = _fa_qkvpacked_cpu
+        sys.modules["flash_attn"].flash_attn_varlen_kvpacked_func = _fa_varlen_kvpacked_cpu
+        sys.modules["flash_attn.ops.activations"].swiglu = _fa_swiglu
+        sys.modules["flash_attn.ops.layer_norm"].layer_norm = _fa_layer_norm
+        sys.modules["flash_attn.ops.rms_norm"].rms_norm = _fa_rms_norm
+        sys.modules["flash_attn.ops.triton.layer_norm"].layer_norm_fn = _fa_layer_norm
+        sys.modules["flash_attn.ops.triton.layer_norm"].rms_norm_fn = _fa_rms_norm
+
     try:
         import base_models.order as order_mod
 
