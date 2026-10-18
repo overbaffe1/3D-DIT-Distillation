@@ -143,11 +143,11 @@ def main():
         t_tensor = torch.tensor([750.0])
 
         t0 = time.perf_counter()
-        ref_pos = ref_model.core.flow(xt_sparse, t_tensor, context, clf_tok).feats
+        ref_pos = ref_model.core.flow(xt_sparse, t_tensor, clf_tok, context).feats
         t_ref_pos = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        ref_neg = ref_model.core.flow(xt_sparse, t_tensor, torch.zeros_like(context), clf_tok).feats
+        ref_neg = ref_model.core.flow(xt_sparse, t_tensor, clf_tok, torch.zeros_like(context)).feats
         t_ref_neg = time.perf_counter() - t0
 
         xt_sorted = noise[geom["perm"]].contiguous()
@@ -169,7 +169,7 @@ def main():
 
     # 2. Benchmark ODE Solvers against 50-step Baseline Euler Teacher
     print("\nRunning 50-step baseline teacher trajectory...")
-    cond_obj = LatDitConditioning(dino_features=dino_t[:, :256, :], batch_size=1)  # 256 cond tokens for fast multi-solver sweep
+    cond_obj = LatDitConditioning(dino_features=dino_t[:, :69, :], batch_size=1)  # 5 + 8x8 = 69 cond tokens for fast multi-solver sweep
 
     def run_config(scfg: SolverConfig):
         sol_model.solver_config = scfg

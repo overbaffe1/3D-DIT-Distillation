@@ -131,8 +131,8 @@ def test_pytorch_pipeline() -> None:
             xt_sparse = sp.SparseTensor(feats=noise, coords=coords)
             t_tensor = torch.tensor([750.0], device=device, dtype=torch.float32)
 
-            ref_pos = ref_model.core.flow(xt_sparse, t_tensor, context.float(), clf_tok.float()).feats
-            ref_neg = ref_model.core.flow(xt_sparse, t_tensor, torch.zeros_like(context).float(), clf_tok.float()).feats
+            ref_pos = ref_model.core.flow(xt_sparse, t_tensor, clf_tok.float(), context.float()).feats
+            ref_neg = ref_model.core.flow(xt_sparse, t_tensor, clf_tok.float(), torch.zeros_like(context).float()).feats
 
             xt_sorted = noise[geom["perm"]].contiguous()
             fast_pos_sorted = sol_model.runner.forward_flow_fast(
@@ -155,7 +155,12 @@ def test_pytorch_pipeline() -> None:
 
             # Test full generate() call and metadata recording
             g = torch.Generator(device=device).manual_seed(123)
-            out_latents = sol_model.generate([vox_t], conditioning=cond_input, generator=g)
+            out_latents = sol_model.generate(
+                [vox_t],
+                conditioning=cond_input,
+                sampling=FlowMatchSamplingParams(num_inference_steps=4),
+                generator=g,
+            )
             assert isinstance(out_latents, list) and len(out_latents) == 1
             assert out_latents[0].shape == (len(vox_t), 16)
             assert torch.isfinite(out_latents[0]).all()
