@@ -14,7 +14,7 @@ weights_dir: None
 errors: []
 notes: []
 
-Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (21.6 KB)
+Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (21.9 KB)
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=[]
@@ -23,10 +23,25 @@ Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-D
 Traceback (most recent call last):
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 170, in <module>
     test_pytorch_pipeline()
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 131, in test_pytorch_pipeline
-    xt_sparse = sp.SparseTensor(feats=noise, coords=coords)
-                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/sparse.py", line 99, in __init__
-    self.data = SparseTensorData(
-                ^^^^^^^^^^^^^^^^^
-TypeError: SparseConvTensor() takes no arguments
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 134, in test_pytorch_pipeline
+    ref_pos = ref_model.core.flow(xt_sparse, t_tensor, context.float(), clf_tok.float()).feats
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1783, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1794, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/models/generators/lat_dit.py", line 798, in forward
+    h, cond = block(h, pos, clf_cond, clf_shared, cond)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1783, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1794, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/models/generators/lat_dit.py", line 558, in forward
+    assert cond_size * cond_size == cond.shape[1] - 5
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError
