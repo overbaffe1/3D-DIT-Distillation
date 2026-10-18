@@ -14,7 +14,7 @@ weights_dir: None
 errors: []
 notes: []
 
-Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (20.8 KB)
+Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (21.1 KB)
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=[]
@@ -23,6 +23,10 @@ Traceback (most recent call last):
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 170, in <module>
     test_pytorch_pipeline()
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 63, in test_pytorch_pipeline
+    from lib.fast_kernels import preload_extensions
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/__init__.py", line 4, in <module>
+    from lib.fast_flow import OptimizedLatDitRunner
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 13, in <module>
     import base_models.sparse as sp
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/sparse.py", line 15, in <module>
     SparseTensorData = importlib.import_module(
