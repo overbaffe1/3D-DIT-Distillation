@@ -1,0 +1,43 @@
+name: Fetch Baseline and Inspect Data
+
+on:
+  push:
+    branches:
+      - arena/8f28ae4f-3d-dit-distillation
+    paths:
+      - '.github/scripts/inspect_and_fetch.py'
+      - '.github/workflows/fetch_baseline.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: arena/8f28ae4f-3d-dit-distillation
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install remotezip
+        run: pip install remotezip requests
+
+      - name: Run inspect and fetch script
+        run: python .github/scripts/inspect_and_fetch.py
+
+      - name: Commit and push fetched baseline code and metadata
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add baseline_repo fetched_info
+          git status
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: fetch baseline code and dataset/weights metadata"
+            git push origin arena/8f28ae4f-3d-dit-distillation
+          fi
