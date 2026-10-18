@@ -20,12 +20,19 @@ Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-D
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=[]
    [PASS] Submission format verified.
 2. Testing Solution class contract & numerical equivalence...
-   pos_pred max_abs_diff=9.54e-07, cos_sim=1.00000012
-   neg_pred (1-token vs 4101-token) max_abs_diff=3.46e-06, cos_sim=0.99999964
+   pos_pred max_abs_diff=9.54e-07, cos_sim=1.00000000
+   neg_pred (1-token vs 4101-token) max_abs_diff=3.81e-06, cos_sim=0.99999982
+   generate() output shape=(512, 16), metadata={'generator_class': 'solution.Solution', 'inputs': {'sampling': {'guidance_scale': 2.5, 'cfg_range': [0.5, 1.0], 'rescale_t': 3.0, 'num_inference_steps': 4}, 'sampling_kwargs': {}, 'batch_size': 1, 'num_voxels': [512], 'generator_seed': 123}, 'elapsed_seconds': 29.813106217000012, 'status': 'ok'}
+   [PASS] PyTorch pipeline & numerical equivalence verified.
+Streaming flow.blocks.0.* real pretrained weights sequentially...
+Loaded 13 real pretrained tensors from flow.blocks.0 in 28.5s
 Traceback (most recent call last):
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 175, in <module>
-    test_pytorch_pipeline()
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 168, in test_pytorch_pipeline
-    assert meta is not None and "wall_seconds" in meta and "generator_class" in meta
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/.github/scripts/verify_teacher_and_solvers.py", line 255, in <module>
+    main()
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/.github/scripts/verify_teacher_and_solvers.py", line 133, in main
+    vox_np = np.load(sample_dir / "vox_idxi.npz")["vox_idxi"][:384]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/numpy/lib/_npyio_impl.py", line 454, in load
+    fid = stack.enter_context(open(os.fspath(file), "rb"))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/fetched_info/sample_test_data/public_test/0029d9fc39fa4c1d9eae4fd370f6f8cd/cache/vox_idxi.npz'
