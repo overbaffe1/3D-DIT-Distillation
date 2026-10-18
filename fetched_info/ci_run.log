@@ -14,7 +14,7 @@ weights_dir: None
 errors: []
 notes: []
 
-Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (21.5 KB)
+Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (21.6 KB)
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=[]
@@ -23,35 +23,10 @@ Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-D
 Traceback (most recent call last):
   File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 170, in <module>
     test_pytorch_pipeline()
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 127, in test_pytorch_pipeline
-    geom = sol_model.runner._prepare_sample_geometry([vox_t], context)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 285, in _prepare_sample_geometry
-    fwd_idx, bwd_idx, cu_seqlens, max_len = calc_order_partition(
-                                            ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/order.py", line 323, in calc_order_partition
-    code = encode(coords, mode)
-           ^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/order.py", line 297, in encode
-    return encode_hilbert(xyz, "xyz")
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/order.py", line 108, in encode_hilbert
-    _encode_hilbert_kernel[grid](
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/jit.py", line 374, in <lambda>
-    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
-                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/jit.py", line 731, in run
-    device = driver.active.get_current_device()
-             ^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/driver.py", line 39, in active
-    self._active = self.default
-                   ^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/driver.py", line 33, in default
-    self._default = _create_driver()
-                    ^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/triton/runtime/driver.py", line 20, in _create_driver
-    raise RuntimeError(f"{len(active_drivers)} active drivers ({active_drivers}). There should only be one.")
-RuntimeError: 0 active drivers ([]). There should only be one.
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 131, in test_pytorch_pipeline
+    xt_sparse = sp.SparseTensor(feats=noise, coords=coords)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/base_models/sparse.py", line 99, in __init__
+    self.data = SparseTensorData(
+                ^^^^^^^^^^^^^^^^^
+TypeError: SparseConvTensor() takes no arguments
