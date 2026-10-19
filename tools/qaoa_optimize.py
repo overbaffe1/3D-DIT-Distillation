@@ -690,7 +690,7 @@ class CalibratedTeacherEnsemble:
         uncond_mid_cache = mid_cache_enabled and bool(cfg.get("uncond_mid_block_cache", True))
         step0_striding = mid_cache_enabled and bool(cfg.get("step0_hilbert_striding", True))
         mid_start = int(cfg.get("mid_block_start", 1))
-        mid_end = int(cfg.get("mid_block_end", 23))
+        mid_end = int(cfg.get("mid_block_end", 24))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         active_dino_ratio = max(1, min(8, mid_start)) / 8.0 if mid_cache_enabled else 1.0
         step0_pos_cost = (0.34 * (5.0 / 8.0) + 0.66 * (9.0 / 24.0)) if step0_striding else 1.00
@@ -1116,9 +1116,10 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "step0_mid_cycle_scale": 2.65,
         "deep_block_start": 1,
         "mid_block_start": 1,
-        "mid_block_end": 23,
+        "mid_block_end": 24,
         "uncond_mid_block_cache": True,
         "single_dino_cond_pass": False,
+        "hicache_hermite_sigma": 0.18,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1182,9 +1183,10 @@ def run_qaoa_optimization(
             best_cfg["step0_hilbert_striding"] = True
             best_cfg["deep_block_start"] = 1
             best_cfg["mid_block_start"] = 1
-            best_cfg["mid_block_end"] = 23
+            best_cfg["mid_block_end"] = 24
             best_cfg["uncond_mid_block_cache"] = True
             best_cfg["single_dino_cond_pass"] = False
+            best_cfg["hicache_hermite_sigma"] = 0.18
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)

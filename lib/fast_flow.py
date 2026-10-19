@@ -262,6 +262,16 @@ class OptimizedLatDitRunner:
         if len(sc.qaoa_kerr_scales) == D:
             out["kerr_vec"] = torch.tensor(sc.qaoa_kerr_scales, device=device, dtype=torch.float32).view(1, -1).contiguous()
 
+        # Check whether the 128x128 Butcher readout matrices are within physical spectral bounds
+        # for arbitrary high-res N-voxel clouds (guard against synthetic basis over-conditioning)
+        max_rk_abs = 0.0
+        for mat in sc.qaoa_rk_pos_mixers + sc.qaoa_rk_cfg_mixers:
+            for row in mat:
+                for val in row:
+                    if abs(float(val)) > max_rk_abs:
+                        max_rk_abs = abs(float(val))
+        out["rk_spectral_safe"] = max_rk_abs <= 0.15
+
         self._qaoa_tensors_cache[key] = out
         return out
 
@@ -543,22 +553,11 @@ class OptimizedLatDitRunner:
 
         num_blocks = len(self.flow.blocks)
         mid_start = int(getattr(self.solver_config, "mid_block_start", 1))
-        mid_end = min(int(getattr(self.solver_config, "mid_block_end", 23)), num_blocks - 1)
+        raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
+        mid_end = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
         can_mid_cache = (0 < mid_start < mid_end)
-        use_step0_striding = (
-            can_mid_cache
-            and (cached_mid_delta is None)
-            and return_mid_delta
-            and (num_blocks == 24)
-            and bool(getattr(self.solver_config, "step0_hilbert_striding", True))
-        )
-        s0_cond_scale = float(getattr(self.solver_config, "step0_cond_cycle_scale", 0.85))
-        s0_mid_scale = float(getattr(self.solver_config, "step0_mid_cycle_scale", 2.65))
         x_mid_in: Optional[torch.Tensor] = None
         cond_mid_in: Optional[torch.Tensor] = None
-        x_s0_c2_in: Optional[torch.Tensor] = None
-        cond_s0_c2_in: Optional[torch.Tensor] = None
-        x_s0_m8_in: Optional[torch.Tensor] = None
         mid_delta_out: Optional[torch.Tensor] = None
         cond_delta_out: Optional[torch.Tensor] = None
 
@@ -569,6 +568,9 @@ class OptimizedLatDitRunner:
                         x = x + cached_mid_delta * float(mid_cache_scale)
                         if cached_cond_delta is not None and ln_cond_after_7 is None:
                             ln_cond_after_7 = fast_layer_norm(cond + cached_cond_delta)
+                        if mid_end == num_blocks:
+                            # True First-Block Cache (FBCache): tail residual already reaches after block 23!
+                            break
                     if kv_cc_cache_out is not None:
                         kv_cc_cache_out.append(None)
                     continue
@@ -577,44 +579,6 @@ class OptimizedLatDitRunner:
                         x_mid_in = x
                     if return_cond_delta:
                         cond_mid_in = cond
-
-            if use_step0_striding:
-                if uncond:
-                    # 1-token uncond on Step 0: execute 6 anchor blocks (0, 1, 7, 8, 22, 23)
-                    if b_idx == 1:
-                        x_s0_c2_in = x
-                        cond_s0_c2_in = cond
-                    elif 2 <= b_idx <= 6:
-                        if b_idx == 2 and x_s0_c2_in is not None and cond_s0_c2_in is not None:
-                            x = x + (x - x_s0_c2_in) * s0_cond_scale
-                            cond = cond + (cond - cond_s0_c2_in) * s0_cond_scale
-                        continue
-                    elif b_idx == 8:
-                        x_s0_m8_in = x
-                    elif 9 <= b_idx <= 21:
-                        if b_idx == 9 and x_s0_m8_in is not None:
-                            x = x + (x - x_s0_m8_in) * s0_mid_scale
-                        continue
-                else:
-                    # Pos on Step 0: execute 9 anchor blocks (0, 1, 2, 3, 7, 8, 9, 22, 23)
-                    if b_idx == 2:
-                        x_s0_c2_in = x
-                        cond_s0_c2_in = cond
-                    elif 4 <= b_idx <= 6:
-                        if b_idx == 4 and x_s0_c2_in is not None and cond_s0_c2_in is not None:
-                            x = x + (x - x_s0_c2_in) * s0_cond_scale
-                            cond = cond + (cond - cond_s0_c2_in) * s0_cond_scale
-                        if kv_cc_cache_out is not None:
-                            kv_cc_cache_out.append(None)
-                        continue
-                    elif b_idx == 8:
-                        x_s0_m8_in = x
-                    elif 10 <= b_idx <= 21:
-                        if b_idx == 10 and x_s0_m8_in is not None:
-                            x = x + (x - x_s0_m8_in) * s0_mid_scale
-                        if kv_cc_cache_out is not None:
-                            kv_cc_cache_out.append(None)
-                        continue
 
             s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = block_gates[b_idx]
             fwd_idx, bwd_idx, cu_seqlens, max_len = order_caches[block.order_idx]
@@ -924,7 +888,8 @@ class OptimizedLatDitRunner:
         uncond_mid_sc = float(getattr(self.solver_config, "qaoa_uncond_mid_scale", 0.95))
 
         qt = self._get_qaoa_tensors(device) if use_qaoa else {}
-        b_init_t = qt.get("b_init_t")
+        apply_rk_readout = use_qaoa and bool(qt.get("rk_spectral_safe", False))
+        b_init_t = qt.get("b_init_t") if apply_rk_readout else None
         if b_init_t is not None:
             rk_corr = xt @ b_init_t
 
@@ -960,8 +925,8 @@ class OptimizedLatDitRunner:
                 )
             elif need_cond_cache and use_mid_cache and (last_mid_delta is not None):
                 # Step 2+: refresh DINO conditioning in block 0 at new t_eval, reconstruct ln_cond_after_7
-                # via Delta-DiT `last_cond_delta`, and skip 22 middle blocks (1..22) to run block 23!
-                v_pos, last_cond7 = self.forward_flow_fast(
+                # via Delta-DiT `last_cond_delta`, and apply True First-Block Cache (FBCache)!
+                v_pos, new_cond7 = self.forward_flow_fast(
                     xt,
                     t_eval,
                     context,
@@ -973,6 +938,12 @@ class OptimizedLatDitRunner:
                     mid_cache_scale=mid_sc,
                     cached_cond_delta=last_cond_delta,
                 )
+                if last_cond7 is None:
+                    last_cond7 = new_cond7
+                elif new_cond7 is not None:
+                    for b_i, kv_new in enumerate(new_cond7):
+                        if kv_new is not None and b_i < len(last_cond7):
+                            last_cond7[b_i] = kv_new
             elif need_cond_cache and use_mid_cache:
                 v_pos, last_cond7, last_mid_delta, last_cond_delta = self.forward_flow_fast(
                     xt,
@@ -1035,7 +1006,11 @@ class OptimizedLatDitRunner:
                 else:
                     if cfg_mode == "neg_reuse" and last_neg is not None:
                         neg_fd_vecs = qt.get("neg_fd_vecs", [])
-                        fd_vec = neg_fd_vecs[step_idx] if (use_qaoa and prev_v_pos is not None and step_idx < len(neg_fd_vecs)) else None
+                        fd_vec = (
+                            neg_fd_vecs[step_idx]
+                            if (apply_rk_readout and prev_v_pos is not None and step_idx < len(neg_fd_vecs))
+                            else None
+                        )
                         if fd_vec is not None:
                             neg_est = torch.addcmul(last_neg, v_pos - prev_v_pos, fd_vec, value=1.0)
                             cur_delta = v_pos - neg_est
@@ -1051,14 +1026,14 @@ class OptimizedLatDitRunner:
                 if use_qaoa and step_idx < len(self.solver_config.qaoa_cfg_scales):
                     cfg_mult = float(self.solver_config.qaoa_cfg_scales[step_idx])
                 step_cfg_vecs = qt.get("step_cfg_vecs", [])
-                cfg_ch = step_cfg_vecs[step_idx] if (use_qaoa and step_idx < len(step_cfg_vecs)) else None
+                cfg_ch = step_cfg_vecs[step_idx] if (apply_rk_readout and step_idx < len(step_cfg_vecs)) else None
                 if cfg_ch is not None:
                     v = torch.addcmul(v_pos, cur_delta, cfg_ch, value=guidance_scale * cfg_mult)
                 else:
                     v = v_pos + (guidance_scale * cfg_mult) * cur_delta
 
                 b_cfg_t_list = qt.get("b_cfg_t", [])
-                b_cfg_t = b_cfg_t_list[step_idx] if (use_qaoa and step_idx < len(b_cfg_t_list)) else None
+                b_cfg_t = b_cfg_t_list[step_idx] if (apply_rk_readout and step_idx < len(b_cfg_t_list)) else None
                 if b_cfg_t is not None:
                     cfg_rk_feat = (cur_delta * v_pos) if (not eval_neg) else cur_delta
                     if rk_corr is None:
@@ -1069,7 +1044,7 @@ class OptimizedLatDitRunner:
                 v = v_pos
 
             b_pos_t_list = qt.get("b_pos_t", [])
-            b_pos_t = b_pos_t_list[step_idx] if (use_qaoa and step_idx < len(b_pos_t_list)) else None
+            b_pos_t = b_pos_t_list[step_idx] if (apply_rk_readout and step_idx < len(b_pos_t_list)) else None
             if b_pos_t is not None:
                 if rk_corr is None:
                     rk_corr = v_pos @ b_pos_t
@@ -1094,7 +1069,7 @@ class OptimizedLatDitRunner:
                 if step_idx < len(self.solver_config.qaoa_momentum):
                     mom = float(self.solver_config.qaoa_momentum[step_idx])
                 mom_vecs = qt.get("mom_vecs", [])
-                mom_vec = mom_vecs[step_idx] if step_idx < len(mom_vecs) else None
+                mom_vec = mom_vecs[step_idx] if (apply_rk_readout and step_idx < len(mom_vecs)) else None
                 if prev_v is not None and (abs(mom) > 1e-7 or mom_vec is not None):
                     if mom_vec is not None:
                         v_step = torch.addcmul(v, v - prev_v, mom_vec, value=1.0)
@@ -1104,12 +1079,21 @@ class OptimizedLatDitRunner:
                     v_step = v
 
                 acc_vecs = qt.get("acc_vecs", [])
-                acc_vec = acc_vecs[step_idx] if step_idx < len(acc_vecs) else None
-                if prev2_v is not None and prev_v is not None and acc_vec is not None:
-                    v_step = torch.addcmul(v_step, v - 2.0 * prev_v + prev2_v, acc_vec, value=1.0)
+                acc_vec = acc_vecs[step_idx] if (apply_rk_readout and step_idx < len(acc_vecs)) else None
+                if prev2_v is not None and prev_v is not None:
+                    if acc_vec is not None:
+                        v_step = torch.addcmul(v_step, v - 2.0 * prev_v + prev2_v, acc_vec, value=1.0)
+                    else:
+                        # HiCache Dual-Scaled Hermite 2nd-Order Velocity Forecast + Faster-TRELLIS Directional Gate
+                        hermite_sigma = float(getattr(self.solver_config, "hicache_hermite_sigma", 0.18))
+                        if hermite_sigma > 0.0:
+                            dv_cur = v - prev_v
+                            dv_prev = prev_v - prev2_v
+                            if float((dv_cur * dv_prev).mean().item()) > 0.0:
+                                v_step = v_step + (0.5 * hermite_sigma * hermite_sigma) * (dv_cur - dv_prev)
 
                 dt_scale = 1.0
-                if step_idx < len(self.solver_config.qaoa_dt_scales):
+                if apply_rk_readout and step_idx < len(self.solver_config.qaoa_dt_scales):
                     dt_scale = float(self.solver_config.qaoa_dt_scales[step_idx])
                 dt_eff = dt * dt_scale
             elif use_ab2 and (prev_v is not None) and (prev_dt is not None):
@@ -1124,25 +1108,26 @@ class OptimizedLatDitRunner:
             prev_v = v
             prev_dt = dt
             step_ch_vecs = qt.get("step_ch_vecs", [])
-            ch_vec = step_ch_vecs[step_idx] if (use_qaoa and step_idx < len(step_ch_vecs)) else None
+            ch_vec = step_ch_vecs[step_idx] if (apply_rk_readout and step_idx < len(step_ch_vecs)) else None
             if ch_vec is not None:
                 xt = torch.addcmul(xt, v_step, ch_vec, value=-dt_eff)
             else:
                 xt = xt - dt_eff * v_step
 
         # Optional QAOA 16x16 cross-channel linear readout mixer + per-channel scale/bias + Kerr cubic term
-        ch_mixer_t = qt.get("ch_mixer_t")
-        if ch_mixer_t is not None:
-            xt = xt @ ch_mixer_t
-        ch_scale = qt.get("ch_scale")
-        ch_bias = qt.get("ch_bias")
-        if ch_scale is not None and ch_bias is not None:
-            xt = xt * ch_scale + ch_bias
-        if rk_corr is not None:
-            xt = xt + rk_corr
-        kerr_vec = qt.get("kerr_vec")
-        if kerr_vec is not None:
-            xt = torch.addcmul(xt, xt * xt * xt, kerr_vec, value=1.0)
+        if apply_rk_readout:
+            ch_mixer_t = qt.get("ch_mixer_t")
+            if ch_mixer_t is not None:
+                xt = xt @ ch_mixer_t
+            ch_scale = qt.get("ch_scale")
+            ch_bias = qt.get("ch_bias")
+            if ch_scale is not None and ch_bias is not None:
+                xt = xt * ch_scale + ch_bias
+            if rk_corr is not None:
+                xt = xt + rk_corr
+            kerr_vec = qt.get("kerr_vec")
+            if kerr_vec is not None:
+                xt = torch.addcmul(xt, xt * xt * xt, kerr_vec, value=1.0)
 
         # Unpermute back to original vox_idxs order and denormalize once
         xt_orig = xt[geom["up_widx"]]
