@@ -23,6 +23,8 @@ from lib.fast_kernels import (
     build_order_caches_fast,
     fast_gate,
     fast_gate_add,
+    fast_gate_add_and_modulate,
+    fast_gate_add_and_modulate_cond,
     fast_gate_add_cond,
     fast_layer_norm,
     fast_modulate,
@@ -31,6 +33,7 @@ from lib.fast_kernels import (
     fast_rms_norm,
     fast_sparse_conv3d,
     fast_swiglu,
+    fast_swiglu_from_packed,
     flash_cond_self_attn,
     flash_cross_attn,
     flash_varlen_qkvpacked_already_sorted,
@@ -904,10 +907,11 @@ class OptimizedLatDitRunner:
                         else:
                             v_cond = block.cond_to_qkv(h_cond).view(1, 1, 3, D)[:, :, 2]
                         cond_msa_out = block.cond_to_out(v_cond)
-                    cond = fast_gate_add_cond(cond, cond_msa_out, cg_msa)
 
-                    # Exact 1-token cross-attention: algebraic 2-layer collapse `to_out_cross(cond_to_v_cross(h_cond_cr))`!
-                    h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
+                    # Fused `cond = cond + cond_msa_out * cg_msa` + `h_cond_cr = LayerNorm(cond) * (1 + cs_cr) + csh_cr`!
+                    cond, h_cond_cr = fast_gate_add_and_modulate_cond(
+                        cond, cond_msa_out, cg_msa, cs_cr, csh_cr, use_triton=use_triton
+                    )
                     if skip_cond_out:
                         c1_w = getattr(block, "_cond_1tok_cr_w", None) if use_1tok_collapse else None
                         if c1_w is not None:
@@ -962,12 +966,21 @@ class OptimizedLatDitRunner:
                         h_c_cross = flash_cross_attn(
                             q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seq_use, q_max_use
                         )
-                        cond = fast_gate_add_cond(cond, block.cond_to_out_cross(h_c_cross.view(1, 1, D)), cg_cr)
+                        cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
+                            cond,
+                            block.cond_to_out_cross(h_c_cross.view(1, 1, D)),
+                            cg_cr,
+                            cs_mlp,
+                            csh_mlp,
+                            use_triton=use_triton,
+                        )
 
-                        # 1-token cond FFN
-                        h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
-                        hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
-                        cond = fast_gate_add_cond(cond, block.cond_ffn1(fast_swiglu(hc_gate, hc)), cg_mlp)
+                        # 1-token cond FFN with Fused Packed SwiGLU
+                        cond = fast_gate_add_cond(
+                            cond,
+                            block.cond_ffn1(fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)),
+                            cg_mlp,
+                        )
 
                     x = fast_gate_add(x, h_x_cross, sizes, g_cr)
 
@@ -1012,7 +1025,9 @@ class OptimizedLatDitRunner:
                     ):
                         # HetCache (arXiv:2603.24260, 2026): static DINO context tokens in Block 0
                         # reuse their O(L^2) self-attention output projection modulated by current `cg_msa(t)`!
-                        cond = fast_gate_add_cond(cond, self._last_b0_cond_msa_out, cg_msa)
+                        cond, h_cond_cr = fast_gate_add_and_modulate_cond(
+                            cond, self._last_b0_cond_msa_out, cg_msa, cs_cr, csh_cr, use_triton=use_triton
+                        )
                     else:
                         h_cond = fast_modulate_cond(cond, cs_msa, csh_msa)
                         qkv_cond = block.cond_to_qkv(h_cond).view(batch_size, L, 3, H, HD)
@@ -1025,10 +1040,11 @@ class OptimizedLatDitRunner:
                         cond_msa_proj = block.cond_to_out(h_cond.reshape(batch_size, L, D))
                         if b_idx == 0 and not uncond:
                             self._last_b0_cond_msa_out = cond_msa_proj
-                        cond = fast_gate_add_cond(cond, cond_msa_proj, cg_msa)
+                        cond, h_cond_cr = fast_gate_add_and_modulate_cond(
+                            cond, cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
+                        )
 
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
-                    h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
                     if skip_cond_out:
                         # Exact Cross-KV Slice: when skip_cond_out=True, Q_cc ([L, D]) is never used!
                         # Compute only K_cc, V_cc ([L, 2*D]), cutting 33.3% of DINO cross-QKV GEMM FLOPs!
@@ -1125,13 +1141,20 @@ class OptimizedLatDitRunner:
                             q_seq_pos,
                             q_max_pos,
                         )
-                        cond = fast_gate_add_cond(
-                            cond, block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D)), cg_cr
+                        cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
+                            cond,
+                            block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D)),
+                            cg_cr,
+                            cs_mlp,
+                            csh_mlp,
+                            use_triton=use_triton,
                         )
 
-                        h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
-                        hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
-                        cond = fast_gate_add_cond(cond, block.cond_ffn1(fast_swiglu(hc_gate, hc)), cg_mlp)
+                        cond = fast_gate_add_cond(
+                            cond,
+                            block.cond_ffn1(fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)),
+                            cg_mlp,
+                        )
 
                 if b_idx == self.cond_depth - 1 and cached_cond_block7 is None:
                     if return_cond_delta and cond_mid_in is not None:
@@ -1204,15 +1227,14 @@ class OptimizedLatDitRunner:
                 else:
                     x_b0_cr = x
 
-            # --- 3. Main FFN + 3D Submanifold Sparse Conv + SwiGLU ---
+            # --- 3. Main FFN + 3D Submanifold Sparse Conv + Fused Packed SwiGLU ---
             h_mlp = fast_modulate(x, sizes, s_mlp, sh_mlp)
             h_mlp = block.ffn0(h_mlp)
             if block.use_ffn_conv:
                 w_fp32 = getattr(block, "_ffn_conv_w_fp32", block.ffn_conv.weight.float().contiguous())
                 b_fp32 = getattr(block, "_ffn_conv_b_fp32", block.ffn_conv.bias.float().contiguous())
                 h_mlp = fast_sparse_conv3d(h_mlp, w_fp32, b_fp32, conv_indices)
-            h1, h_gate = h_mlp.chunk(2, dim=-1)
-            h_mlp = block.ffn1(fast_swiglu(h_gate, h1))
+            h_mlp = block.ffn1(fast_swiglu_from_packed(h_mlp, use_triton=use_triton))
             x = fast_gate_add(x, h_mlp, sizes, g_mlp)
 
             if can_mid_cache and b_idx == (mid_end - 1) and return_mid_delta and x_mid_in is not None:
@@ -1392,6 +1414,8 @@ class OptimizedLatDitRunner:
         last_neg_x0: Optional[torch.Tensor] = None
         at_blend = float(getattr(self.solver_config, "autotarget_clean_endpoint_blend", 0.08))
         erta_alpha = float(getattr(self.solver_config, "ertacache_euler_alpha", 0.04))
+        cd_omega = float(getattr(self.solver_config, "counterdiabatic_berry_omega", 0.025))
+        magnus_gamma = float(getattr(self.solver_config, "magnus_commutator_gamma", 0.015))
         num_blocks = len(self.flow.blocks)
         raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
         mid_end_eff = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
@@ -1649,7 +1673,20 @@ class OptimizedLatDitRunner:
                 ):
                     # ERTACache Euler Trajectory Error-Adjustment (ICLR 2026, bytedance/ERTACache):
                     # Compensate accumulated caching truncation error on skipped conditioning steps!
-                    v_step = v_step + erta_alpha * (v_pos - prev_v_pos)
+                    v_step = torch.add(v_step, v_pos - prev_v_pos, alpha=erta_alpha)
+
+                if (not apply_rk_readout) and prev_v is not None and (cd_omega > 0.0 or magnus_gamma > 0.0):
+                    # Quantum Counterdiabatic Berry-Gauge Driving (Berry 2009 / Sels & Polkovnikov 2017)
+                    # + 4th-Order Magnus Lie-Commutator Integrator (Magnus 1954 / Blanes et al. 2009):
+                    # Orthogonal Fubini-Study / Berry connection projection of flow acceleration `dv = v - prev_v`
+                    # onto the normal subspace of `v`, rotating the step along geodesic curvature with zero
+                    # longitudinal norm overshoot!
+                    dv_b = v - prev_v
+                    v_norm_sq = (v * v).sum().clamp_min(1e-6)
+                    proj_coeff = (dv_b * v).sum() / v_norm_sq
+                    dv_perp = torch.addcmul(dv_b, v, proj_coeff, value=-1.0)
+                    eff_cd = cd_omega + magnus_gamma * dt
+                    v_step = torch.add(v_step, dv_perp, alpha=eff_cd)
 
                 dt_scale = 1.0
                 if apply_rk_readout and step_idx < len(self.solver_config.qaoa_dt_scales):

@@ -541,10 +541,211 @@ def fast_rms_norm(
     return out
 
 
+if HAS_TRITON:
+
+    @triton.jit
+    def _fused_gate_add_ln_modulate_kernel(
+        X_ptr,
+        H_ptr,
+        G_ptr,
+        W_ptr,
+        B_ptr,
+        X_OUT_ptr,
+        MOD_OUT_ptr,
+        M: int,
+        D: tl.constexpr,
+        eps: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if row >= M:
+            return
+        cols = tl.arange(0, BLOCK_D)
+        mask = cols < D
+        base = row * D + cols
+
+        x = tl.load(X_ptr + base, mask=mask, other=0.0).to(tl.float32)
+        h = tl.load(H_ptr + base, mask=mask, other=0.0).to(tl.float32)
+        g = tl.load(G_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+
+        x_next = (x + h * g).to(X_OUT_ptr.dtype.element_ty)
+        tl.store(X_OUT_ptr + base, x_next, mask=mask)
+
+        xf = x_next.to(tl.float32)
+        mean = tl.sum(xf, axis=0) / D
+        diff = tl.where(mask, xf - mean, 0.0)
+        var = tl.sum(diff * diff, axis=0) / D
+        rstd = tl.rsqrt(var + eps)
+
+        w = tl.load(W_ptr + cols, mask=mask, other=1.0).to(tl.float32)
+        b = tl.load(B_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        mod_out = (diff * rstd * w + b).to(MOD_OUT_ptr.dtype.element_ty)
+        tl.store(MOD_OUT_ptr + base, mod_out, mask=mask)
+
+    @triton.jit
+    def _fused_packed_swiglu_kernel(
+        IN_ptr,
+        OUT_ptr,
+        M: int,
+        D_half: int,
+        BLOCK_D: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        col_blk = tl.program_id(1)
+        if row >= M:
+            return
+        cols = col_blk * BLOCK_D + tl.arange(0, BLOCK_D)
+        mask = cols < D_half
+        in_base = row * (2 * D_half)
+        h1 = tl.load(IN_ptr + in_base + cols, mask=mask, other=0.0).to(tl.float32)
+        gate = tl.load(IN_ptr + in_base + D_half + cols, mask=mask, other=0.0).to(tl.float32)
+        sig = tl.sigmoid(gate)
+        out = (gate * sig * h1).to(OUT_ptr.dtype.element_ty)
+        tl.store(OUT_ptr + row * D_half + cols, out, mask=mask)
+
+
+def fast_gate_add_and_modulate(
+    residual: torch.Tensor,
+    h: torch.Tensor,
+    sizes: List[int],
+    gate_scale: torch.Tensor,
+    next_scale: torch.Tensor,
+    next_shift: torch.Tensor,
+    eps: float = 1e-6,
+    use_triton: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused `x_next = residual + h * gate_scale` AND `h_mod = LayerNorm(x_next) * (1 + next_scale) + next_shift`
+    in a single Triton kernel pass (eliminating a full HBM round-trip of `x_next`).
+    """
+    if (
+        use_triton
+        and HAS_TRITON
+        and residual.is_cuda
+        and len(sizes) == 1
+        and residual.is_contiguous()
+        and h.is_contiguous()
+        and residual.shape[-1] <= 2048
+    ):
+        D = residual.shape[-1]
+        M = residual.shape[0]
+        g = getattr(gate_scale, "_g_2d", None)
+        if g is None:
+            g = gate_scale.view(-1)
+        w = getattr(next_scale, "_w_1ps", None)
+        if w is None:
+            w = 1.0 + next_scale.view(-1)
+        b = getattr(next_shift, "_b_1d", None)
+        if b is None:
+            b = next_shift.view(-1)
+        x_out = torch.empty_like(residual)
+        mod_out = torch.empty_like(residual)
+        block_d = triton.next_power_of_2(D)
+        _fused_gate_add_ln_modulate_kernel[(M,)](
+            residual,
+            h,
+            g,
+            w,
+            b,
+            x_out,
+            mod_out,
+            M=M,
+            D=D,
+            eps=eps,
+            BLOCK_D=block_d,
+            num_warps=8 if block_d >= 2048 else 4,
+        )
+        return x_out, mod_out
+    x_next = fast_gate_add(residual, h, sizes, gate_scale)
+    h_mod = fast_modulate(x_next, sizes, next_scale, next_shift, eps=eps)
+    return x_next, h_mod
+
+
+def fast_gate_add_and_modulate_cond(
+    cond: torch.Tensor,
+    h: torch.Tensor,
+    gate_scale: torch.Tensor,
+    next_scale: torch.Tensor,
+    next_shift: torch.Tensor,
+    eps: float = 1e-6,
+    use_triton: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused `cond_next = cond + h * gate_scale` AND `h_cond = LayerNorm(cond_next) * (1 + next_scale) + next_shift`
+    for `[1, L, D]` conditioning tensors in a single Triton kernel pass.
+    """
+    if (
+        use_triton
+        and HAS_TRITON
+        and cond.is_cuda
+        and cond.shape[0] == 1
+        and cond.is_contiguous()
+        and h.is_contiguous()
+        and cond.shape[-1] <= 2048
+    ):
+        D = cond.shape[-1]
+        M = cond.shape[1]
+        g = getattr(gate_scale, "_g_2d", None)
+        if g is None:
+            g = gate_scale.view(-1)
+        w = getattr(next_scale, "_w_1ps", None)
+        if w is None:
+            w = 1.0 + next_scale.view(-1)
+        b = getattr(next_shift, "_b_1d", None)
+        if b is None:
+            b = next_shift.view(-1)
+        c_out = torch.empty_like(cond)
+        mod_out = torch.empty_like(cond)
+        block_d = triton.next_power_of_2(D)
+        _fused_gate_add_ln_modulate_kernel[(M,)](
+            cond,
+            h,
+            g,
+            w,
+            b,
+            c_out,
+            mod_out,
+            M=M,
+            D=D,
+            eps=eps,
+            BLOCK_D=block_d,
+            num_warps=8 if block_d >= 2048 else 4,
+        )
+        return c_out, mod_out
+    c_next = fast_gate_add_cond(cond, h, gate_scale)
+    h_mod = fast_modulate_cond(c_next, next_scale, next_shift, eps=eps)
+    return c_next, h_mod
+
+
 def fast_swiglu(gate: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     if x.is_cuda and _SWIGLU_FN is not None:
         return _SWIGLU_FN(gate, x)
     return (F.silu(gate.float()) * x.float()).to(x.dtype)
+
+
+def fast_swiglu_from_packed(h_packed: torch.Tensor, use_triton: bool = True) -> torch.Tensor:
+    """
+    Fused SwiGLU directly from packed `[..., 2 * D_half]` tensor (`h1, h_gate = h_packed.chunk(2, dim=-1)`),
+    eliminating `.chunk(2, dim=-1)` and the two hidden `.contiguous()` copies inside `flash_attn`'s `swiglu`.
+    """
+    D2 = h_packed.shape[-1]
+    D_half = D2 // 2
+    if use_triton and HAS_TRITON and h_packed.is_cuda and h_packed.is_contiguous():
+        M = h_packed.numel() // D2
+        out = torch.empty((*h_packed.shape[:-1], D_half), device=h_packed.device, dtype=h_packed.dtype)
+        block_d = 1024 if D_half >= 1024 else triton.next_power_of_2(max(32, D_half))
+        grid = (M, triton.cdiv(D_half, block_d))
+        _fused_packed_swiglu_kernel[grid](
+            h_packed,
+            out,
+            M=M,
+            D_half=D_half,
+            BLOCK_D=block_d,
+            num_warps=4,
+        )
+        return out
+    h1, h_gate = h_packed.chunk(2, dim=-1)
+    return fast_swiglu(h_gate, h1)
 
 
 def precompute_rope_3d_table(
