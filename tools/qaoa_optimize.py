@@ -487,6 +487,8 @@ class CalibratedTeacherEnsemble:
                 magnus_gamma = float(cfg.get("magnus_commutator_gamma", 0.015))
                 if cd_omega > 0.0 or magnus_gamma > 0.0:
                     eff_cd = cd_omega + magnus_gamma * dt
+                    use_cheb_pade = bool(cfg.get("chebyshev_pade_resolvent", True))
+                    pade_eta = float(cfg.get("pade_resolvent_eta", 0.018))
                     dot_dv = 0.0
                     norm_v = 0.0
                     for m in range(self.num_modes):
@@ -495,6 +497,19 @@ class CalibratedTeacherEnsemble:
                             dot_dv += dv_mc * v[m][c]
                             norm_v += v[m][c] * v[m][c]
                     proj_c = dot_dv / max(1e-8, norm_v)
+                    if use_cheb_pade and pade_eta > 0.0:
+                        norm_dv_p = 0.0
+                        for m in range(self.num_modes):
+                            for c in range(self.latent_dim):
+                                dv_p = (v[m][c] - prev_v[m][c]) - proj_c * v[m][c]
+                                norm_dv_p += dv_p * dv_p
+                        tau_c = 2.0 * t_cur - 1.0
+                        cheb_t2 = 2.0 * tau_c * tau_c - 1.0
+                        eff_cd = (
+                            eff_cd
+                            * (1.0 + 0.12 * cheb_t2)
+                            / (1.0 + pade_eta * (norm_dv_p / max(1e-8, norm_v)))
+                        )
                     for m in range(self.num_modes):
                         for c in range(self.latent_dim):
                             dv_perp = (v[m][c] - prev_v[m][c]) - proj_c * v[m][c]
@@ -686,6 +701,8 @@ class CalibratedTeacherEnsemble:
                 magnus_gamma = float(cfg.get("magnus_commutator_gamma", 0.015))
                 if cd_omega > 0.0 or magnus_gamma > 0.0:
                     eff_cd = cd_omega + magnus_gamma * dt
+                    use_cheb_pade = bool(cfg.get("chebyshev_pade_resolvent", True))
+                    pade_eta = float(cfg.get("pade_resolvent_eta", 0.018))
                     dot_dv = 0.0
                     norm_v = 0.0
                     for m in range(self.num_modes):
@@ -694,6 +711,19 @@ class CalibratedTeacherEnsemble:
                             dot_dv += dv_mc * v[m][c]
                             norm_v += v[m][c] * v[m][c]
                     proj_c = dot_dv / max(1e-8, norm_v)
+                    if use_cheb_pade and pade_eta > 0.0:
+                        norm_dv_p = 0.0
+                        for m in range(self.num_modes):
+                            for c in range(self.latent_dim):
+                                dv_p = (v[m][c] - prev_v[m][c]) - proj_c * v[m][c]
+                                norm_dv_p += dv_p * dv_p
+                        tau_c = 2.0 * t_cur - 1.0
+                        cheb_t2 = 2.0 * tau_c * tau_c - 1.0
+                        eff_cd = (
+                            eff_cd
+                            * (1.0 + 0.12 * cheb_t2)
+                            / (1.0 + pade_eta * (norm_dv_p / max(1e-8, norm_v)))
+                        )
                     for m in range(self.num_modes):
                         for c in range(self.latent_dim):
                             dv_perp = (v[m][c] - prev_v[m][c]) - proj_c * v[m][c]
@@ -739,6 +769,7 @@ class CalibratedTeacherEnsemble:
         fused_cond_gate = bool(cfg.get("fused_cond_gate_add", True))
         fused_gate_ln = bool(cfg.get("fused_gate_ln_modulate", True))
         fused_swiglu_pk = bool(cfg.get("fused_packed_swiglu", True))
+        fused_out_unp = bool(cfg.get("fused_out_unpatchify", True))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         dino_b0_factor = 0.0 if pab_step2 else (0.10 if (foca_dbe and hetcache_b0) else (0.42 if foca_dbe else 1.0))
         active_dino_ratio = (
@@ -747,46 +778,47 @@ class CalibratedTeacherEnsemble:
             else 1.0
         )
         cond_refresh_vox_factor = (
-            0.170
-            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln)
+            0.155
+            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
             else (
-                0.185
-                if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate)
-                else (0.20 if (pab_step2 and single_gate_fp) else (0.23 if pab_step2 else (0.30 if subblock_crf else 0.66)))
+                0.170
+                if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln)
+                else (0.185 if (pab_step2 and single_gate_fp) else (0.23 if pab_step2 else 0.30))
             )
         )
         fast_pos_factor = (
-            0.165
-            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln)
+            0.150
+            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
             else (
-                0.180
-                if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate)
-                else (0.195 if (freqca_crf and single_gate_fp) else (0.22 if freqca_crf else (0.46 if pab_cr_bcast else 0.66)))
+                0.165
+                if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln)
+                else (0.180 if (freqca_crf and single_gate_fp) else (0.22 if freqca_crf else 0.46))
             )
         )
         fast_neg_factor = 0.015 if (freqca_crf and b0_msa_share and hetcache_b0) else (0.04 if (freqca_crf and b0_msa_share) else 0.34)
         step0_cond_blocks = (
-            4.25
-            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk)
+            4.10
+            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
             else (
-                4.45
-                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate)
-                else (4.65 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
+                4.25
+                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk)
+                else (4.45 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
             )
         )
-        step0_pos_cost = (0.34 * (step0_cond_blocks / 8.0) + 0.66 * (7.0 / 24.0)) if step0_striding else 1.00
+        step0_vox_blocks = 6.80 if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp) else 7.0
+        step0_pos_cost = (0.34 * (step0_cond_blocks / 8.0) + 0.66 * (step0_vox_blocks / 24.0)) if step0_striding else 1.00
         step0_neg_blocks = (
-            2.55
-            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk)
+            2.35
+            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
             else (
-                2.75
-                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok)
-                else (3.1 if (step0_striding and b0_msa_share and qmc_stride >= 4) else (3.5 if (step0_striding and b0_msa_share) else 4.0))
+                2.55
+                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk)
+                else (2.75 if (step0_striding and b0_msa_share and qmc_stride >= 4) else 3.5)
             )
         )
         step0_neg_cost = (0.34 * (step0_neg_blocks / 24.0)) if step0_striding else 0.34
         fixed_overhead = (
-            0.030
+            0.027
             if (
                 pab_step2
                 and qmc_stride >= 4
@@ -796,11 +828,12 @@ class CalibratedTeacherEnsemble:
                 and fused_cond_gate
                 and fused_gate_ln
                 and fused_swiglu_pk
+                and fused_out_unp
             )
             else (
-                0.033
-                if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp and collapse_1tok and fused_cond_gate)
-                else (0.036 if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp) else 0.048)
+                0.030
+                if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp and collapse_1tok and fused_cond_gate and fused_gate_ln)
+                else 0.033
             )
         )
 
@@ -1251,6 +1284,9 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "magnus_commutator_gamma": 0.015,
         "fused_gate_ln_modulate": True,
         "fused_packed_swiglu": True,
+        "chebyshev_pade_resolvent": True,
+        "pade_resolvent_eta": 0.018,
+        "fused_out_unpatchify": True,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1341,6 +1377,9 @@ def run_qaoa_optimization(
             best_cfg["magnus_commutator_gamma"] = 0.015
             best_cfg["fused_gate_ln_modulate"] = True
             best_cfg["fused_packed_swiglu"] = True
+            best_cfg["chebyshev_pade_resolvent"] = True
+            best_cfg["pade_resolvent_eta"] = 0.018
+            best_cfg["fused_out_unpatchify"] = True
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)

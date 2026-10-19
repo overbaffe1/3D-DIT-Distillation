@@ -553,6 +553,7 @@ if HAS_TRITON:
         X_OUT_ptr,
         MOD_OUT_ptr,
         M: int,
+        H_STRIDE_ROW: int,
         D: tl.constexpr,
         eps: tl.constexpr,
         BLOCK_D: tl.constexpr,
@@ -565,7 +566,7 @@ if HAS_TRITON:
         base = row * D + cols
 
         x = tl.load(X_ptr + base, mask=mask, other=0.0).to(tl.float32)
-        h = tl.load(H_ptr + base, mask=mask, other=0.0).to(tl.float32)
+        h = tl.load(H_ptr + row * H_STRIDE_ROW + cols, mask=mask, other=0.0).to(tl.float32)
         g = tl.load(G_ptr + cols, mask=mask, other=0.0).to(tl.float32)
 
         x_next = (x + h * g).to(X_OUT_ptr.dtype.element_ty)
@@ -581,6 +582,43 @@ if HAS_TRITON:
         b = tl.load(B_ptr + cols, mask=mask, other=0.0).to(tl.float32)
         mod_out = (diff * rstd * w + b).to(MOD_OUT_ptr.dtype.element_ty)
         tl.store(MOD_OUT_ptr + base, mod_out, mask=mask)
+
+    @triton.jit
+    def _fused_out_modulate_unpatchify_kernel(
+        X_ptr,
+        W_MOD_ptr,
+        B_MOD_ptr,
+        W_UNPATCH_ptr,
+        OUT_ptr,
+        M: int,
+        D: tl.constexpr,
+        C_OUT: tl.constexpr,
+        eps: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        if row >= M:
+            return
+        cols = tl.arange(0, BLOCK_D)
+        mask = cols < D
+        base = row * D + cols
+
+        xf = tl.load(X_ptr + base, mask=mask, other=0.0).to(tl.float32)
+        mean = tl.sum(xf, axis=0) / D
+        diff = tl.where(mask, xf - mean, 0.0)
+        var = tl.sum(diff * diff, axis=0) / D
+        rstd = tl.rsqrt(var + eps)
+
+        w_mod = tl.load(W_MOD_ptr + cols, mask=mask, other=1.0).to(tl.float32)
+        b_mod = tl.load(B_MOD_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        mod_x = ((diff * rstd * w_mod + b_mod).to(X_ptr.dtype.element_ty)).to(tl.float32)
+        mod_x = tl.where(mask, mod_x, 0.0)
+
+        out_base = row * C_OUT
+        for c in tl.static_range(C_OUT):
+            w_u = tl.load(W_UNPATCH_ptr + c * D + cols, mask=mask, other=0.0).to(tl.float32)
+            acc = tl.sum(mod_x * w_u, axis=0)
+            tl.store(OUT_ptr + out_base + c, acc)
 
     @triton.jit
     def _fused_packed_swiglu_kernel(
@@ -629,6 +667,7 @@ def fast_gate_add_and_modulate(
     ):
         D = residual.shape[-1]
         M = residual.shape[0]
+        h_stride_row = 0 if h.shape[0] == 1 else D
         g = getattr(gate_scale, "_g_2d", None)
         if g is None:
             g = gate_scale.view(-1)
@@ -650,6 +689,7 @@ def fast_gate_add_and_modulate(
             x_out,
             mod_out,
             M=M,
+            H_STRIDE_ROW=h_stride_row,
             D=D,
             eps=eps,
             BLOCK_D=block_d,
@@ -685,6 +725,7 @@ def fast_gate_add_and_modulate_cond(
     ):
         D = cond.shape[-1]
         M = cond.shape[1]
+        h_stride_row = 0 if h.shape[1] == 1 else D
         g = getattr(gate_scale, "_g_2d", None)
         if g is None:
             g = gate_scale.view(-1)
@@ -706,6 +747,7 @@ def fast_gate_add_and_modulate_cond(
             c_out,
             mod_out,
             M=M,
+            H_STRIDE_ROW=h_stride_row,
             D=D,
             eps=eps,
             BLOCK_D=block_d,
@@ -715,6 +757,57 @@ def fast_gate_add_and_modulate_cond(
     c_next = fast_gate_add_cond(cond, h, gate_scale)
     h_mod = fast_modulate_cond(c_next, next_scale, next_shift, eps=eps)
     return c_next, h_mod
+
+
+def fast_out_modulate_unpatchify(
+    x: torch.Tensor,
+    sizes: List[int],
+    out_scale: torch.Tensor,
+    out_shift: torch.Tensor,
+    unpatchify_w_fp32: torch.Tensor,
+    eps: float = 1e-6,
+    use_triton: bool = True,
+) -> torch.Tensor:
+    """
+    Fused Output LayerNorm + AdaLN modulation + FP32 Unpatchify projection (`[N, D] -> [N, 16]`):
+    Eliminates writing `[N, 1536]` BF16 and `[N, 1536]` FP32 intermediate buffers to HBM!
+    """
+    if (
+        use_triton
+        and HAS_TRITON
+        and x.is_cuda
+        and len(sizes) == 1
+        and x.is_contiguous()
+        and unpatchify_w_fp32.is_contiguous()
+        and x.shape[-1] <= 2048
+        and unpatchify_w_fp32.shape[0] <= 32
+    ):
+        M, D = x.shape
+        c_out = unpatchify_w_fp32.shape[0]
+        w_mod = getattr(out_scale, "_w_1ps", None)
+        if w_mod is None:
+            w_mod = 1.0 + out_scale.view(-1)
+        b_mod = getattr(out_shift, "_b_1d", None)
+        if b_mod is None:
+            b_mod = out_shift.view(-1)
+        out = torch.empty((M, c_out), device=x.device, dtype=torch.float32)
+        block_d = triton.next_power_of_2(D)
+        _fused_out_modulate_unpatchify_kernel[(M,)](
+            x,
+            w_mod,
+            b_mod,
+            unpatchify_w_fp32,
+            out,
+            M=M,
+            D=D,
+            C_OUT=c_out,
+            eps=eps,
+            BLOCK_D=block_d,
+            num_warps=8 if block_d >= 2048 else 4,
+        )
+        return out
+    x_mod = fast_modulate(x, sizes, out_scale, out_shift, eps=eps)
+    return F.linear(x_mod.float(), unpatchify_w_fp32)
 
 
 def fast_swiglu(gate: torch.Tensor, x: torch.Tensor) -> torch.Tensor:

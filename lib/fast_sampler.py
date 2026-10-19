@@ -61,6 +61,9 @@ class SolverConfig:
     magnus_commutator_gamma: float = 0.015
     fused_gate_ln_modulate: bool = True
     fused_packed_swiglu: bool = True
+    chebyshev_pade_resolvent: bool = True
+    pade_resolvent_eta: float = 0.018
+    fused_out_unpatchify: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

@@ -30,6 +30,7 @@ from lib.fast_kernels import (
     fast_modulate,
     fast_modulate_cond,
     fast_modulate_preln_cond,
+    fast_out_modulate_unpatchify,
     fast_rms_norm,
     fast_sparse_conv3d,
     fast_swiglu,
@@ -717,10 +718,11 @@ class OptimizedLatDitRunner:
                 and not return_ln_cond7
             ):
                 # Fast Uncond CRF Short-Circuit (FreqCa + DiTFastAttn + DMD Exponential Decay):
-                # Single-kernel `torch.add(..., alpha=...)` without temporary [N, 1536] allocation!
+                # Single-kernel `torch.add(..., alpha=...)` + Fused OutModulate & Unpatchify!
                 x = torch.add(x, cached_mid_delta, alpha=eff_mid_scale)
-                x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
-                return F.linear(x.float(), self._unpatchify_w_fp32)
+                return fast_out_modulate_unpatchify(
+                    x, sizes, tg["out_scale"], tg["out_shift"], self._unpatchify_w_fp32, use_triton=use_triton
+                )
         else:
             # Patchify (for patch_size=1 on pre-sorted coords, this is a single linear projection)
             x = F.linear(xt_sorted.to(dtype=compute_dtype), self.flow.patchify.weight.to(dtype=compute_dtype))
@@ -982,7 +984,7 @@ class OptimizedLatDitRunner:
                             cg_mlp,
                         )
 
-                    x = fast_gate_add(x, h_x_cross, sizes, g_cr)
+                    cr_out_for_x = h_x_cross
 
                 elif cached_cond_block7 is not None:
                     # PAB (Pyramid Attention Broadcast, ICLR 2025): on fast FBCache steps, broadcast
@@ -995,7 +997,7 @@ class OptimizedLatDitRunner:
                         and self._last_b0_cr_proj.shape == (N, D)
                         and self._last_b0_cr_proj.device == device
                     ):
-                        x = fast_gate_add(x, self._last_b0_cr_proj, sizes, g_cr)
+                        cr_out_for_x = self._last_b0_cr_proj
                     else:
                         # Reuse cached K,V of conditioning from previous step; only compute Q_x and x->cond cross-attn!
                         h_x = fast_modulate(x, sizes, s_cr, sh_cr)
@@ -1011,7 +1013,7 @@ class OptimizedLatDitRunner:
                         cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
                         if b_idx == 0 and not uncond:
                             self._last_b0_cr_proj = cr_proj_out
-                        x = fast_gate_add(x, cr_proj_out, sizes, g_cr)
+                        cr_out_for_x = cr_proj_out
                 else:
                     L = cond.shape[1]
                     if (
@@ -1079,7 +1081,7 @@ class OptimizedLatDitRunner:
                         cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
                         if b_idx == 0 and not uncond:
                             self._last_b0_cr_proj = cr_proj_out
-                        x = fast_gate_add(x, cr_proj_out, sizes, g_cr)
+                        cr_out_for_x = cr_proj_out
                     else:
                         if (
                             return_mid_delta
@@ -1131,7 +1133,7 @@ class OptimizedLatDitRunner:
                         cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
                         if b_idx == 0 and not uncond:
                             self._last_b0_cr_proj = cr_proj_out
-                        x = fast_gate_add(x, cr_proj_out, sizes, g_cr)
+                        cr_out_for_x = cr_proj_out
 
                         h_c_out = flash_cross_attn(
                             qkv_cc_cr[:, 0],
@@ -1178,7 +1180,7 @@ class OptimizedLatDitRunner:
                         else:
                             v_cc = block.cond_to_kv_cross(h_cond_cr).view(1, 2, D)[:, 1]
                         h_x_cross = block.to_out_cross(v_cc)
-                    x = fast_gate_add(x, h_x_cross, sizes, g_cr)
+                    cr_out_for_x = h_x_cross
                 elif cached_cond_block7 is not None:
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
@@ -1186,7 +1188,7 @@ class OptimizedLatDitRunner:
                     h_x_out = flash_cross_attn(
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
                     )
-                    x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                    cr_out_for_x = block.to_out_cross(h_x_out.reshape(N, D))
                 else:
                     L = cond.shape[1]
                     h_cond_cr = fast_modulate_preln_cond(ln_cond_after_7, cs_cr, csh_cr)
@@ -1198,9 +1200,10 @@ class OptimizedLatDitRunner:
                     h_x_out = flash_cross_attn(
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
                     )
-                    x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                    cr_out_for_x = block.to_out_cross(h_x_out.reshape(N, D))
 
             if b_idx == 0 and (not uncond) and use_subblock_crf:
+                x = fast_gate_add(x, cr_out_for_x, sizes, g_cr)
                 if cached_mid_delta is not None and (
                     getattr(self, "_last_pos_crf_after_b0_cr", None) is not None
                     and self._last_pos_crf_after_b0_cr.shape == (N, D)
@@ -1226,9 +1229,14 @@ class OptimizedLatDitRunner:
                     break
                 else:
                     x_b0_cr = x
+                    h_mlp = fast_modulate(x, sizes, s_mlp, sh_mlp)
+            else:
+                # Fused Cross-Attention Gate-Add + FFN LayerNorm & AdaLN Modulation in 1 Triton kernel!
+                x, h_mlp = fast_gate_add_and_modulate(
+                    x, cr_out_for_x, sizes, g_cr, s_mlp, sh_mlp, use_triton=use_triton
+                )
 
             # --- 3. Main FFN + 3D Submanifold Sparse Conv + Fused Packed SwiGLU ---
-            h_mlp = fast_modulate(x, sizes, s_mlp, sh_mlp)
             h_mlp = block.ffn0(h_mlp)
             if block.use_ffn_conv:
                 w_fp32 = getattr(block, "_ffn_conv_w_fp32", block.ffn_conv.weight.float().contiguous())
@@ -1249,9 +1257,10 @@ class OptimizedLatDitRunner:
                 else:
                     mid_delta_out = x - x_mid_in
 
-        # Output LayerNorm + exact FP32 Unpatchify projection (zero BF16 output truncation)
-        x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
-        out = F.linear(x.float(), self._unpatchify_w_fp32)
+        # Fused Output LayerNorm + AdaLN modulation + exact FP32 Unpatchify projection
+        out = fast_out_modulate_unpatchify(
+            x, sizes, tg["out_scale"], tg["out_shift"], self._unpatchify_w_fp32, use_triton=use_triton
+        )
 
         if return_cond_block7 and return_mid_delta and return_cond_delta:
             return out, kv_cc_cache_out, mid_delta_out, cond_delta_out
@@ -1416,6 +1425,8 @@ class OptimizedLatDitRunner:
         erta_alpha = float(getattr(self.solver_config, "ertacache_euler_alpha", 0.04))
         cd_omega = float(getattr(self.solver_config, "counterdiabatic_berry_omega", 0.025))
         magnus_gamma = float(getattr(self.solver_config, "magnus_commutator_gamma", 0.015))
+        use_cheb_pade = bool(getattr(self.solver_config, "chebyshev_pade_resolvent", True))
+        pade_eta = float(getattr(self.solver_config, "pade_resolvent_eta", 0.018))
         num_blocks = len(self.flow.blocks)
         raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
         mid_end_eff = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
@@ -1686,7 +1697,16 @@ class OptimizedLatDitRunner:
                     proj_coeff = (dv_b * v).sum() / v_norm_sq
                     dv_perp = torch.addcmul(dv_b, v, proj_coeff, value=-1.0)
                     eff_cd = cd_omega + magnus_gamma * dt
-                    v_step = torch.add(v_step, dv_perp, alpha=eff_cd)
+                    if use_cheb_pade and pade_eta > 0.0:
+                        # Quantum Chebyshev-Pade [1/1] Resolvent (Shanks 1955 / Baker & Graves-Morris 1996):
+                        # Modulate by Chebyshev T_2(2*t - 1) and regularize via Green's resolvent 1 / (1 + eta * ||dv_perp||^2 / ||v||^2)!
+                        tau_c = 2.0 * t_val - 1.0
+                        cheb_t2 = 2.0 * tau_c * tau_c - 1.0
+                        eff_cd = eff_cd * (1.0 + 0.12 * cheb_t2)
+                        resolvent = 1.0 / (1.0 + pade_eta * ((dv_perp * dv_perp).sum() / v_norm_sq))
+                        v_step = torch.addcmul(v_step, dv_perp, resolvent, value=eff_cd)
+                    else:
+                        v_step = torch.add(v_step, dv_perp, alpha=eff_cd)
 
                 dt_scale = 1.0
                 if apply_rk_readout and step_idx < len(self.solver_config.qaoa_dt_scales):
