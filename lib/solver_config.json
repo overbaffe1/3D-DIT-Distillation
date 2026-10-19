@@ -3127,5 +3127,9 @@
   "autotarget_clean_endpoint_blend": 0.08,
   "pab_step2_cr_gate_broadcast": true,
   "barycache_crf_beta": 0.1,
-  "hilbert_qmc_uncond_stride": 4
+  "hilbert_qmc_uncond_stride": 4,
+  "hilbert_qmc_pos_stride": 4,
+  "ertacache_euler_alpha": 0.04,
+  "sencache_sensitivity_scale": true,
+  "single_gate_fast_path": true
 }

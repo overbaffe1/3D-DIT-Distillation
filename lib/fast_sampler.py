@@ -50,6 +50,10 @@ class SolverConfig:
     pab_step2_cr_gate_broadcast: bool = True
     barycache_crf_beta: float = 0.10
     hilbert_qmc_uncond_stride: int = 4
+    hilbert_qmc_pos_stride: int = 4
+    ertacache_euler_alpha: float = 0.04
+    sencache_sensitivity_scale: bool = True
+    single_gate_fast_path: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

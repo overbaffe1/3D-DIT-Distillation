@@ -615,6 +615,70 @@ def apply_rope_cached_2d(
 if HAS_TRITON:
 
     @triton.jit
+    def _triton_hilbert_dist_3d(fx, fy, fz):
+        x = fx.to(tl.int64)
+        y = fy.to(tl.int64)
+        z = fz.to(tl.int64)
+        for i in tl.static_range(15, 0, -1):
+            q = 1 << i
+            p = q - 1
+            x ^= tl.where((x & q) > 0, p, 0)
+            cond = (y & q) > 0
+            t = (x ^ y) & p
+            x ^= tl.where(cond, p, t)
+            y ^= tl.where(cond, 0, t)
+            cond = (z & q) > 0
+            t = (x ^ z) & p
+            x ^= tl.where(cond, p, t)
+            z ^= tl.where(cond, 0, t)
+        y ^= x
+        z ^= y
+        t = tl.zeros_like(z)
+        for i in tl.static_range(15, 0, -1):
+            q = 1 << i
+            t ^= tl.where((z & q) > 0, q - 1, 0)
+        x ^= t
+        y ^= t
+        z ^= t
+        ret = tl.zeros_like(z)
+        for i in tl.static_range(0, 16):
+            q = 1 << i
+            ret |= (x & q) << (2 * i + 2)
+            ret |= (y & q) << (2 * i + 1)
+            ret |= (z & q) << (2 * i + 0)
+        return ret
+
+    @triton.jit
+    def _encode_hilbert_4_kernel(
+        xyz_ptr,
+        codes_ptr,
+        N,
+        str_xyz_N,
+        str_xyz_C,
+        BLK: tl.constexpr,
+    ):
+        """Fused single-pass 4-mode Hilbert curve encoder for ('h', 'ht1', 'h1', 'ht')."""
+        pid_n = tl.program_id(0)
+        offs_n = pid_n * BLK + tl.arange(0, BLK)
+        mask_n = offs_n < N
+
+        xyz_ptrs = xyz_ptr + offs_n * str_xyz_N
+        bx = tl.load(xyz_ptrs, mask=mask_n, other=0).to(tl.int64) << 48
+        fx = tl.load(xyz_ptrs + 1 * str_xyz_C, mask=mask_n, other=0)
+        fy = tl.load(xyz_ptrs + 2 * str_xyz_C, mask=mask_n, other=0)
+        fz = tl.load(xyz_ptrs + 3 * str_xyz_C, mask=mask_n, other=0)
+
+        c_h = _triton_hilbert_dist_3d(fx, fy, fz) | bx
+        c_ht1 = _triton_hilbert_dist_3d(fy + 1, fx + 1, fz + 1) | bx
+        c_h1 = _triton_hilbert_dist_3d(fx + 1, fy + 1, fz + 1) | bx
+        c_ht = _triton_hilbert_dist_3d(fy, fx, fz) | bx
+
+        tl.store(codes_ptr + 0 * N + offs_n, c_h, mask=mask_n)
+        tl.store(codes_ptr + 1 * N + offs_n, c_ht1, mask=mask_n)
+        tl.store(codes_ptr + 2 * N + offs_n, c_h1, mask=mask_n)
+        tl.store(codes_ptr + 3 * N + offs_n, c_ht, mask=mask_n)
+
+    @triton.jit
     def _fused_qknorm_rope3d_gather_kernel(
         qkv_ptr,
         q_scale_ptr,
@@ -1079,3 +1143,129 @@ def fast_sparse_conv3d(
         if mask_d.any():
             acc[mask_d] += feat_f[idx_d[mask_d]] * w_flat[d]
     return acc.to(feat.dtype)
+
+
+def build_order_caches_fast(
+    h_coords: torch.Tensor,
+    sizes: List[int],
+    orders: List[str],
+    order_kwargs: dict,
+    seqlen_cache: dict,
+    arange_n: torch.Tensor,
+    use_triton: bool = True,
+) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]:
+    """
+    Zero-sync batched Hilbert space-filling curve partition builder:
+      - Eliminates 4 blocking GPU->CPU `.item()` synchronizations (`seqlens.max().item()`) per sample
+      - Precomputes and caches shared `cu_seqlens` and `max_len` on CPU once for all window orders
+      - On CUDA with Triton and standard `orders == ["h", "ht1", "h1", "ht"]`, fuses all 4 Hilbert
+        encodings into a single kernel pass (`_encode_hilbert_4_kernel`) and executes a single
+        batched `[4, N]` radix sort (`torch.argsort(codes_4, dim=-1)`)!
+    """
+    from base_models.order import calc_mixed_partition, calc_order_partition, encode_hilbert, encode_z
+
+    device = h_coords.device
+    N = h_coords.shape[0]
+    patch_size = int(order_kwargs.get("patch_size", 4096))
+    adj_first = bool(order_kwargs.get("adj_first", False))
+    sliding = bool(order_kwargs.get("sliding", False))
+
+    if not adj_first and all(o in ("z", "zt", "h", "ht", "z1", "zt1", "h1", "ht1") for o in orders):
+        # Compute shared `cu_seqlens` and `max_len` purely on Python CPU with zero GPU->CPU sync!
+        part_key = ("order_part", device, tuple(sizes), patch_size, sliding)
+        cached_part = seqlen_cache.get(part_key)
+        if cached_part is None:
+            if sliding:
+                seqlens_list = [int(s) for s in sizes]
+            else:
+                seqlens_list = []
+                for s in sizes:
+                    s_int = int(s)
+                    full_chunks = (s_int - 1) // patch_size if s_int > 0 else 0
+                    for _ in range(full_chunks):
+                        seqlens_list.append(patch_size)
+                    if s_int > 0:
+                        seqlens_list.append(s_int - full_chunks * patch_size)
+            max_len = max(seqlens_list) if seqlens_list else 0
+            cu_list = [0]
+            acc_s = 0
+            for sl in seqlens_list:
+                acc_s += sl
+                cu_list.append(acc_s)
+            cu_seqlens = torch.tensor(cu_list, device=device, dtype=torch.int32)
+            cached_part = (cu_seqlens, int(max_len))
+            seqlen_cache[part_key] = cached_part
+        else:
+            cu_seqlens, max_len = cached_part
+
+        if (
+            use_triton
+            and HAS_TRITON
+            and h_coords.is_cuda
+            and tuple(orders) == ("h", "ht1", "h1", "ht")
+        ):
+            codes_4 = h_coords.new_empty((4, N), dtype=torch.int64)
+            blk = max(32, min(1024, 1 << max(0, (N - 1).bit_length())))
+            grid = ((N + blk - 1) // blk,)
+            _encode_hilbert_4_kernel[grid](
+                h_coords,
+                codes_4,
+                N,
+                h_coords.stride(0),
+                h_coords.stride(1),
+                BLK=blk,
+            )
+            fwd_4 = torch.argsort(codes_4, dim=-1)
+            order_caches = []
+            for idx_o in range(4):
+                fwd_idx = fwd_4[idx_o]
+                bwd_idx = torch.empty_like(fwd_idx)
+                bwd_idx[fwd_idx] = arange_n
+                order_caches.append((fwd_idx, bwd_idx, cu_seqlens, max_len))
+            return order_caches
+
+        h_coords_p1: Optional[torch.Tensor] = None
+        order_caches = []
+        for order in orders:
+            if order.endswith("1"):
+                if h_coords_p1 is None:
+                    h_coords_p1 = h_coords + 1
+                xyz_in = h_coords_p1
+            else:
+                xyz_in = h_coords
+            conv = "yxz" if "t" in order else "xyz"
+            code = encode_hilbert(xyz_in, conv) if order[0] == "h" else encode_z(xyz_in, conv)
+            fwd_idx = torch.argsort(code)
+            bwd_idx = torch.empty_like(fwd_idx)
+            bwd_idx[fwd_idx] = arange_n
+            order_caches.append((fwd_idx, bwd_idx, cu_seqlens, max_len))
+        return order_caches
+
+    order_caches = []
+    for order in orders:
+        if order in ("z", "zt", "h", "ht", "z1", "zt1", "h1", "ht1"):
+            fwd_idx, bwd_idx, cu_seqlens, max_len = calc_order_partition(
+                h_coords,
+                sizes,
+                mode=order,
+                patch_size=patch_size,
+                adj_first=adj_first,
+                sliding=sliding,
+            )
+        elif order in ("zmod", "zdiv", "xmod", "xdiv", "hmod", "hdiv"):
+            fwd_idx, bwd_idx, cu_seqlens, max_len = calc_mixed_partition(
+                h_coords,
+                sizes,
+                mode=order,
+                bucket_size=order_kwargs.get("bucket_size", 512),
+                global_size=order_kwargs.get("global_size", 32),
+            )
+        else:
+            fwd_idx = bwd_idx = arange_n
+            max_len = int(max(sizes))
+            cu_seqlens = torch.cumsum(
+                torch.tensor([0] + sizes, device=device, dtype=torch.int32), dim=0, dtype=torch.int32
+            )
+        order_caches.append((fwd_idx, bwd_idx, cu_seqlens, int(max_len)))
+    return order_caches
+

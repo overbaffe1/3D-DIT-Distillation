@@ -19,6 +19,7 @@ from kandi3d_image23d.runtime import FlowMatchSamplingParams, LatDitConditioning
 from lib.fast_kernels import (
     apply_rope_cached_2d,
     build_conv_indices_fast,
+    build_order_caches_fast,
     fast_gate,
     fast_gate_add,
     fast_layer_norm,
@@ -139,6 +140,9 @@ class OptimizedLatDitRunner:
 
         D = self.dim
         for block in self.flow.blocks:
+            if block.clf_shared:
+                block._gates_cast = block.gates.detach().to(device=device, dtype=target_dtype).contiguous()
+                block._cond_gates_cast = block.cond_gates.detach().to(device=device, dtype=target_dtype).contiguous()
             if block.use_ffn_conv:
                 block._ffn_conv_w_fp32 = block.ffn_conv.weight.detach().to(device=device, dtype=torch.float32).contiguous()
                 block._ffn_conv_b_fp32 = block.ffn_conv.bias.detach().to(device=device, dtype=torch.float32).contiguous()
@@ -189,20 +193,27 @@ class OptimizedLatDitRunner:
                     block.cond_to_kv_cross.bias[D:].contiguous() if block.cond_to_kv_cross.bias is not None else None
                 )
 
+        self._zero_clf_token = torch.zeros(1, self.dim, device=device, dtype=target_dtype).contiguous()
+
         if self.solver_config.precompute_rope_tables:
             self._get_rope_3d_table(device)
             self._get_rope_2d_table(device, 64)
 
-        if self.solver_config.precompute_time_gates and not self.core.use_token:
+        if self.solver_config.precompute_time_gates:
             t_seq, _, _ = build_schedule(self.solver_config, device=device)
             t_list = t_seq.tolist()
             for t_val in t_list[:-1]:
-                self._get_time_gates(float(t_val), device, target_dtype)
+                self._get_time_gates(float(t_val), device, target_dtype, self._zero_clf_token)
             for t_eval in get_qaoa_eval_timesteps(self.solver_config, t_list):
-                self._get_time_gates(float(t_eval), device, target_dtype)
+                self._get_time_gates(float(t_eval), device, target_dtype, self._zero_clf_token)
 
         self._mean_f32 = self.core.mean.detach().view(1, -1).to(device=device, dtype=torch.float32).contiguous()
         self._std_f32 = self.core.std.detach().view(1, -1).to(device=device, dtype=torch.float32).contiguous()
+        self._denorm_scale = (self._std_f32 * self.latent_scale).contiguous()
+        self._denorm_shift = (self._mean_f32 * self.latent_scale).contiguous()
+        self._is_identity_denorm = bool(
+            torch.all(self._denorm_scale == 1.0).item() and torch.all(self._denorm_shift == 0.0).item()
+        )
         if self.solver_config.qaoa_enabled:
             self._get_qaoa_tensors(device)
 
@@ -311,20 +322,30 @@ class OptimizedLatDitRunner:
         device: torch.device,
         dtype: torch.dtype,
         clf_token: Optional[torch.Tensor] = None,
+        block0_only: bool = False,
     ) -> Dict[str, Any]:
-        """Compute (or retrieve cached) timestep embedding and all 24 blocks' modulation/gate tensors."""
-        can_cache = (not self.core.use_token) and (
-            clf_token is None or clf_token.shape[0] == 1
-        )
-        cache_key = (device, dtype, round(float(t_val), 7))
-        if can_cache and cache_key in self._time_gates_cache:
-            return self._time_gates_cache[cache_key]
-
+        """Compute (or retrieve cached) timestep embedding and block modulation/gate tensors."""
         batch_len = 1 if clf_token is None else clf_token.shape[0]
+        is_zero_clf = (
+            (not self.core.use_token)
+            or clf_token is None
+            or (clf_token is getattr(self, "_zero_clf_token", None))
+        )
+        can_cache = batch_len == 1 and is_zero_clf
+        t_key = round(float(t_val), 7)
+        full_cache_key = (device, dtype, t_key, False)
+        if can_cache:
+            if full_cache_key in self._time_gates_cache:
+                return self._time_gates_cache[full_cache_key]
+            if block0_only:
+                b0_cache_key = (device, dtype, t_key, True)
+                if b0_cache_key in self._time_gates_cache:
+                    return self._time_gates_cache[b0_cache_key]
+
         t_tensor = torch.full((batch_len,), float(t_val) * 1000.0, device=device, dtype=torch.float32)
         t_enc = get_time_encoding(t_tensor, self.flow.time_pos_features).to(dtype=dtype)
         temb = self.flow.time_embed(t_enc)
-        if clf_token is not None and self.core.use_token:
+        if clf_token is not None and self.core.use_token and not is_zero_clf:
             clf = F.silu(temb + clf_token.to(dtype=dtype))
         else:
             clf = F.silu(temb)
@@ -333,8 +354,13 @@ class OptimizedLatDitRunner:
 
         block_gates = []
         cond_gates = []
-        for b_idx, block in enumerate(self.flow.blocks):
-            gb = block.gates.type_as(clf_shared) + clf_shared if block.clf_shared else block.gates(clf)
+        blocks_to_eval = self.flow.blocks[:1] if block0_only else self.flow.blocks
+        for block in blocks_to_eval:
+            g_param = getattr(block, "_gates_cast", None)
+            if block.clf_shared:
+                gb = (g_param if g_param is not None else block.gates.type_as(clf_shared)) + clf_shared
+            else:
+                gb = block.gates(clf)
             bg_tuple = gb.chunk(9, dim=-1)
             if batch_len == 1:
                 s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = bg_tuple
@@ -343,8 +369,15 @@ class OptimizedLatDitRunner:
                     sh_t._b_1d = sh_t.view(-1).contiguous()
                     g_t._g_2d = g_t.view(1, -1).contiguous()
             block_gates.append(bg_tuple)
+            if block0_only:
+                cond_gates.append(())
+                continue
+            cg_param = getattr(block, "_cond_gates_cast", None)
             if block.cond:
-                cgb = block.cond_gates.type_as(clf_shared) + clf_shared if block.clf_shared else block.cond_gates(clf)
+                if block.clf_shared:
+                    cgb = (cg_param if cg_param is not None else block.cond_gates.type_as(clf_shared)) + clf_shared
+                else:
+                    cgb = block.cond_gates(clf)
                 cg_tuple = cgb.chunk(9, dim=-1)
                 if batch_len == 1:
                     cs_msa, csh_msa, cg_msa, cs_cr, csh_cr, cg_cr, cs_mlp, csh_mlp, cg_mlp = cg_tuple
@@ -355,7 +388,10 @@ class OptimizedLatDitRunner:
                 cond_gates.append(cg_tuple)
             else:
                 if block.clf_shared:
-                    cgb = block.cond_gates.type_as(clf) + clf_shared[:, 3 * self.dim : 5 * self.dim]
+                    cgb = (
+                        (cg_param if cg_param is not None else block.cond_gates.type_as(clf))
+                        + clf_shared[:, 3 * self.dim : 5 * self.dim]
+                    )
                 else:
                     cgb = block.cond_gates(clf)
                 cg_tuple2 = cgb.chunk(2, dim=-1)
@@ -377,6 +413,7 @@ class OptimizedLatDitRunner:
             "out_shift": out_shift,
         }
         if can_cache and len(self._time_gates_cache) < 256:
+            cache_key = (device, dtype, t_key, bool(block0_only))
             self._time_gates_cache[cache_key] = result
         return result
 
@@ -394,21 +431,30 @@ class OptimizedLatDitRunner:
         coords_in = sp.sparse_coords(vox_idxs).int()
         N = coords_in.shape[0]
         batch_size = len(vox_idxs)
+        arange_n = torch.arange(N, device=device, dtype=torch.long)
 
-        # Replicate SparseDownsample(patch_size=1) coordinate sorting once
-        code = coords_in[:, 1:].long()
-        offs = torch.cumprod((code.max(dim=0).values + 1).flip(dims=(-1,)), 0).flip(dims=(-1,)).long()
-        offs = F.pad(offs, (0, 1), value=1)
-        full_code = coords_in[:, 0].long() * offs[0] + (code * offs[1:]).sum(dim=-1)
-        if batch_size == 1:
-            # Single-sample voxel coordinates are strictly unique: argsort avoids D2H stream sync of unique()
+        # Bit-packed lexicographic key for 3D coordinates (x, y, z) in [0, 1023]^3:
+        # Mathematically and bit-for-bit identical to SparseDownsample(patch_size=1) sort order,
+        # eliminating 6 intermediate GPU kernels (max, 2x flip, cumprod, pad, mul+sum)!
+        if batch_size == 1 and self.res <= 1024:
+            c_long = coords_in.long()
+            full_code = (c_long[:, 1] << 20) | (c_long[:, 2] << 10) | c_long[:, 3]
             perm = torch.argsort(full_code)
             up_widx = torch.empty_like(perm)
-            up_widx[perm] = torch.arange(N, device=device, dtype=perm.dtype)
+            up_widx[perm] = arange_n
         else:
-            windows, up_widx = full_code.unique(return_inverse=True)
-            perm = torch.empty_like(up_widx)
-            perm[up_widx] = torch.arange(len(up_widx), device=device, dtype=up_widx.dtype)
+            code = coords_in[:, 1:].long()
+            offs = torch.cumprod((code.max(dim=0).values + 1).flip(dims=(-1,)), 0).flip(dims=(-1,)).long()
+            offs = F.pad(offs, (0, 1), value=1)
+            full_code = coords_in[:, 0].long() * offs[0] + (code * offs[1:]).sum(dim=-1)
+            if batch_size == 1:
+                perm = torch.argsort(full_code)
+                up_widx = torch.empty_like(perm)
+                up_widx[perm] = arange_n
+            else:
+                windows, up_widx = full_code.unique(return_inverse=True)
+                perm = torch.empty_like(up_widx)
+                perm[up_widx] = arange_n
         h_coords = coords_in[perm].int().contiguous()
 
         # Layout & sizes per batch item
@@ -430,42 +476,26 @@ class OptimizedLatDitRunner:
         cond_size = int(np.round(np.sqrt(cond_tokens - 5)))
         cos_cond_2d, sin_cond_2d = self._get_rope_2d_table(device, cond_size)
 
-        # Precompute all 4 Hilbert space-filling curve attention orders once
-        order_caches = []
-        orders = self.flow.orders
-        order_kwargs = self.flow.order_kwargs
-        patch_size = order_kwargs.get("patch_size", 4096)
-        for order in orders:
-            if order in ("z", "zt", "h", "ht", "z1", "zt1", "h1", "ht1"):
-                fwd_idx, bwd_idx, cu_seqlens, max_len = calc_order_partition(
-                    h_coords,
-                    sizes,
-                    mode=order,
-                    patch_size=patch_size,
-                    adj_first=order_kwargs.get("adj_first", False),
-                    sliding=order_kwargs.get("sliding", False),
-                )
-            elif order in ("zmod", "zdiv", "xmod", "xdiv", "hmod", "hdiv"):
-                fwd_idx, bwd_idx, cu_seqlens, max_len = calc_mixed_partition(
-                    h_coords,
-                    sizes,
-                    mode=order,
-                    bucket_size=order_kwargs.get("bucket_size", 512),
-                    global_size=order_kwargs.get("global_size", 32),
-                )
-            else:
-                fwd_idx = bwd_idx = torch.arange(N, device=device, dtype=torch.long)
-                max_len = max(sizes)
-                cu_seqlens = torch.cumsum(
-                    torch.tensor([0] + sizes, device=device, dtype=torch.int32), dim=0, dtype=torch.int32
-                )
-            order_caches.append((fwd_idx, bwd_idx, cu_seqlens, int(max_len)))
+        # Precompute all 4 Hilbert space-filling curve attention orders once (zero-sync batched fast path)
+        order_caches = build_order_caches_fast(
+            h_coords,
+            sizes,
+            self.flow.orders,
+            self.flow.order_kwargs,
+            self._seqlen_cache,
+            arange_n,
+            use_triton=self.solver_config.use_fused_triton_kernels,
+        )
 
         # Precompute 3D submanifold sparse conv neighbor indices once (replaces 2,112 calls!)
         conv_indices = build_conv_indices_fast(h_coords)
 
         # Cross-attention sequence lengths
-        q_seqlens = torch.tensor([0] + sizes, device=device, dtype=torch.int32).cumsum(0, dtype=torch.int32)
+        q_seq_key = (device, "q_seq", tuple(sizes))
+        q_seqlens = self._seqlen_cache.get(q_seq_key)
+        if q_seqlens is None:
+            q_seqlens = torch.tensor([0] + sizes, device=device, dtype=torch.int32).cumsum(0, dtype=torch.int32)
+            self._seqlen_cache[q_seq_key] = q_seqlens
         q_maxlen = int(max(sizes))
         kv_full_key = (device, cond_tokens, batch_size)
         kv_seqlens_full = self._seqlen_cache.get(kv_full_key)
@@ -546,10 +576,6 @@ class OptimizedLatDitRunner:
         kv_seqlens_full, kv_maxlen_full = geom["kv_seqlens_full"], geom["kv_maxlen_full"]
         kv_seqlens_1tok, kv_maxlen_1tok = geom["kv_seqlens_1tok"], geom["kv_maxlen_1tok"]
 
-        tg = self._get_time_gates(t_val, device, compute_dtype, clf_token)
-        block_gates = tg["block_gates"]
-        cond_gates = tg["cond_gates"]
-
         # DiTFastAttn (NeurIPS 2024): Exact Block-0 Patchify + 3D Self-Attention Sharing across CFG!
         # At b_idx == 0, `cond` has not interacted with `x` yet, so `x` after Block-0 3D Self-Attention
         # in `uncond` is BIT-FOR-BIT IDENTICAL to `pos` at the same timestep `t_val`!
@@ -570,9 +596,34 @@ class OptimizedLatDitRunner:
         use_subblock_crf = use_freqca_crf and bool(getattr(self.solver_config, "dbcache_foca_subblock_crf", True))
         use_hetcache_b0 = bool(getattr(self.solver_config, "hetcache_b0_cond_msa_reuse", True))
         use_pab_step2 = use_subblock_crf and bool(getattr(self.solver_config, "pab_step2_cr_gate_broadcast", True))
+        use_sencache = bool(getattr(self.solver_config, "sencache_sensitivity_scale", True))
         foca_gamma = float(getattr(self.solver_config, "foca_fn_heun_gamma", 0.12))
         bary_beta = float(getattr(self.solver_config, "barycache_crf_beta", 0.10))
         qmc_stride = int(getattr(self.solver_config, "hilbert_qmc_uncond_stride", 4))
+        pos_qmc_stride = int(getattr(self.solver_config, "hilbert_qmc_pos_stride", 4))
+
+        # Single-Gate Fast Path (`block0_only`): on cached steps that exit in Block 0 before `block.cond`,
+        # skip computing 23 unused `block_gates[1..23]` and 24 unused `cond_gates[0..23]`!
+        fast_b0_exit = (
+            bool(getattr(self.solver_config, "single_gate_fast_path", True))
+            and use_freqca_crf
+            and (cached_mid_delta is not None)
+            and (
+                uncond
+                or (
+                    cached_cond_block7 is not None
+                    and getattr(self, "_last_pos_crf_after_b0_msa", None) is not None
+                )
+                or (
+                    use_pab_step2
+                    and getattr(self, "_last_b0_cr_proj", None) is not None
+                    and getattr(self, "_last_pos_crf_after_b0_cr", None) is not None
+                )
+            )
+        )
+        tg = self._get_time_gates(t_val, device, compute_dtype, clf_token, block0_only=fast_b0_exit)
+        block_gates = tg["block_gates"]
+        cond_gates = tg["cond_gates"]
 
         if reuse_b0_msa:
             x = self._last_b0_x_after_msa
@@ -691,7 +742,8 @@ class OptimizedLatDitRunner:
                         and self._last_pos_crf_after_b0_msa.device == device
                     ):
                         # FreqCa CRF (NeurIPS 2026) + DBCache-FoCa Heun Calibrator (vipshop/cache-dit 2026)
-                        # + BaryCache/L2P-Cache 2-Anchor Extrapolation (arXiv:2608.28670 / CVPR 2026) on fast pos steps (1, 3):
+                        # + BaryCache/L2P-Cache 2-Anchor Extrapolation (arXiv:2608.28670 / CVPR 2026)
+                        # + SenCache Sensitivity Scaling (CVPR 2026, vita-epfl/SenCache) on fast pos steps (1, 3):
                         cur_fn_res = x - x_patchify
                         crf_base = self._last_pos_crf_after_b0_msa
                         crf_s0 = getattr(self, "_last_pos_crf_after_b0_msa_step0", None)
@@ -701,7 +753,8 @@ class OptimizedLatDitRunner:
                             and crf_s0 is not crf_base
                             and crf_s0.shape == (N, D)
                         ):
-                            crf_base = (1.0 + bary_beta) * crf_base - bary_beta * crf_s0
+                            eff_beta = bary_beta * float(mid_cache_scale) if use_sencache else bary_beta
+                            crf_base = (1.0 + eff_beta) * crf_base - eff_beta * crf_s0
                         x = x + crf_base * float(mid_cache_scale)
                         if (
                             use_subblock_crf
@@ -911,9 +964,47 @@ class OptimizedLatDitRunner:
                             self._last_b0_cr_proj = cr_proj_out
                         x = fast_gate_add(x, cr_proj_out, sizes, g_cr)
                     else:
-                        qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
+                        if (
+                            return_mid_delta
+                            and (not need_full_kv_cc)
+                            and batch_size == 1
+                            and N >= 64
+                            and pos_qmc_stride > 1
+                        ):
+                            # Dual-Asymmetric Cross-Attention (MC-Sparse arXiv:2610.06801 / JiT CVPR 2026):
+                            # 1. Exact full-N Q_x ([N, H, HD]) for voxel -> DINO cross-attention (`x -> cond`)
+                            # 2. Hilbert-curve QMC strided K_x, V_x (`h_x[::pos_qmc_stride]`) for global DINO
+                            #    context pooling (`cond -> x`), cutting 50% of to_qkv_cross GEMM FLOPs and 75%
+                            #    of reverse FlashAttention FLOPs across all 8 conditioning blocks!
+                            q_w = getattr(block, "_to_q_cross_w", None)
+                            kv_w = getattr(block, "_to_kv_cross_w", None)
+                            if q_w is not None and kv_w is not None:
+                                q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                                h_x_sub = h_x[::pos_qmc_stride]
+                                n_sub_pos = h_x_sub.shape[0]
+                                kv_x = F.linear(h_x_sub, kv_w, getattr(block, "_to_kv_cross_b", None)).view(
+                                    n_sub_pos, 2, H, HD
+                                )
+                                q_seq_pos = geom.get(f"q_seqlens_qmc_{pos_qmc_stride}")
+                                if q_seq_pos is None:
+                                    q_seq_pos = torch.tensor([0, n_sub_pos], device=device, dtype=torch.int32)
+                                    geom[f"q_seqlens_qmc_{pos_qmc_stride}"] = q_seq_pos
+                                q_max_pos = n_sub_pos
+                            else:
+                                qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
+                                q_x = qkv_x_cr[:, 0]
+                                kv_x = qkv_x_cr[:, 1:]
+                                q_seq_pos = q_seqlens
+                                q_max_pos = q_maxlen
+                        else:
+                            qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
+                            q_x = qkv_x_cr[:, 0]
+                            kv_x = qkv_x_cr[:, 1:]
+                            q_seq_pos = q_seqlens
+                            q_max_pos = q_maxlen
+
                         h_x_out = flash_cross_attn(
-                            qkv_x_cr[:, 0],
+                            q_x,
                             q_seqlens,
                             q_maxlen,
                             kv_cc,
@@ -929,9 +1020,9 @@ class OptimizedLatDitRunner:
                             qkv_cc_cr[:, 0],
                             kv_seqlens_full,
                             kv_maxlen_full,
-                            qkv_x_cr[:, 1:],
-                            q_seqlens,
-                            q_maxlen,
+                            kv_x,
+                            q_seq_pos,
+                            q_max_pos,
                         )
                         cond = cond + block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D)) * cg_cr[:, None]
 
@@ -1092,6 +1183,13 @@ class OptimizedLatDitRunner:
 
         if self.core.use_token and "dino_token" in data_dict:
             clf_token = self.core.token_map(data_dict["dino_token"].to(device=device, dtype=compute_dtype))
+        elif (
+            conditioning.batch_size == 1
+            and getattr(self, "_zero_clf_token", None) is not None
+            and self._zero_clf_token.device == device
+            and self._zero_clf_token.dtype == compute_dtype
+        ):
+            clf_token = self._zero_clf_token
         else:
             clf_token = torch.zeros(
                 conditioning.batch_size, self.dim, device=device, dtype=compute_dtype
@@ -1181,6 +1279,17 @@ class OptimizedLatDitRunner:
         self._last_b0_fn_res_step0 = None
         last_neg_x0: Optional[torch.Tensor] = None
         at_blend = float(getattr(self.solver_config, "autotarget_clean_endpoint_blend", 0.08))
+        erta_alpha = float(getattr(self.solver_config, "ertacache_euler_alpha", 0.04))
+        num_blocks = len(self.flow.blocks)
+        raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
+        mid_end_eff = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
+        use_freqca_tail = (
+            use_mid_cache
+            and (mid_end_eff == num_blocks)
+            and bool(getattr(self.solver_config, "freqca_crf_cache", True))
+        )
+        need_cond_delta = not use_freqca_tail
+        need_uncond_ln7 = not use_freqca_tail
 
         for step_idx in range(total_steps):
             t_val = float(t_list[step_idx])
@@ -1200,7 +1309,7 @@ class OptimizedLatDitRunner:
             mid_sc = float(mid_scales[step_idx]) if step_idx < len(mid_scales) else 1.0
 
             if (not eval_cond) and (last_cond7 is not None):
-                # Fast steps (1, 3): execute only blocks 0 and 23 (skipping 22 middle blocks 1..22)!
+                # Fast steps (1, 3): execute only Block 0 Subblock-1 (skipping 23 tail blocks 1..23)!
                 v_pos = self.forward_flow_fast(
                     xt,
                     t_eval,
@@ -1213,8 +1322,7 @@ class OptimizedLatDitRunner:
                     mid_cache_scale=mid_sc,
                 )
             elif need_cond_cache and use_mid_cache and (last_mid_delta is not None):
-                # Step 2+: refresh DINO conditioning in block 0 at new t_eval, reconstruct ln_cond_after_7
-                # via Delta-DiT `last_cond_delta`, and apply True First-Block Cache (FBCache)!
+                # Step 2+: refresh DINO conditioning in block 0 at new t_eval and apply True First-Block Cache!
                 v_pos, new_cond7 = self.forward_flow_fast(
                     xt,
                     t_eval,
@@ -1225,7 +1333,7 @@ class OptimizedLatDitRunner:
                     return_cond_block7=True,
                     cached_mid_delta=last_mid_delta,
                     mid_cache_scale=mid_sc,
-                    cached_cond_delta=last_cond_delta,
+                    cached_cond_delta=last_cond_delta if need_cond_delta else None,
                 )
                 if last_cond7 is None:
                     last_cond7 = new_cond7
@@ -1234,17 +1342,30 @@ class OptimizedLatDitRunner:
                         if kv_new is not None and b_i < len(last_cond7):
                             last_cond7[b_i] = kv_new
             elif need_cond_cache and use_mid_cache:
-                v_pos, last_cond7, last_mid_delta, last_cond_delta = self.forward_flow_fast(
-                    xt,
-                    t_eval,
-                    context,
-                    clf_token,
-                    geom,
-                    uncond=False,
-                    return_cond_block7=True,
-                    return_mid_delta=True,
-                    return_cond_delta=True,
-                )
+                if need_cond_delta:
+                    v_pos, last_cond7, last_mid_delta, last_cond_delta = self.forward_flow_fast(
+                        xt,
+                        t_eval,
+                        context,
+                        clf_token,
+                        geom,
+                        uncond=False,
+                        return_cond_block7=True,
+                        return_mid_delta=True,
+                        return_cond_delta=True,
+                    )
+                else:
+                    v_pos, last_cond7, last_mid_delta = self.forward_flow_fast(
+                        xt,
+                        t_eval,
+                        context,
+                        clf_token,
+                        geom,
+                        uncond=False,
+                        return_cond_block7=True,
+                        return_mid_delta=True,
+                        return_cond_delta=False,
+                    )
             elif need_cond_cache:
                 v_pos, last_cond7 = self.forward_flow_fast(
                     xt, t_eval, context, clf_token, geom, uncond=False, return_cond_block7=True
@@ -1261,16 +1382,28 @@ class OptimizedLatDitRunner:
                 )
                 if eval_neg:
                     if use_uncond_mid_cache and last_uncond_mid_delta is None:
-                        v_neg, last_uncond_mid_delta, last_uncond_ln7 = self.forward_flow_fast(
-                            xt,
-                            t_eval,
-                            context,
-                            clf_token,
-                            geom,
-                            uncond=True,
-                            return_mid_delta=True,
-                            return_ln_cond7=True,
-                        )
+                        if need_uncond_ln7:
+                            v_neg, last_uncond_mid_delta, last_uncond_ln7 = self.forward_flow_fast(
+                                xt,
+                                t_eval,
+                                context,
+                                clf_token,
+                                geom,
+                                uncond=True,
+                                return_mid_delta=True,
+                                return_ln_cond7=True,
+                            )
+                        else:
+                            v_neg, last_uncond_mid_delta = self.forward_flow_fast(
+                                xt,
+                                t_eval,
+                                context,
+                                clf_token,
+                                geom,
+                                uncond=True,
+                                return_mid_delta=True,
+                                return_ln_cond7=False,
+                            )
                     elif use_uncond_mid_cache and last_uncond_mid_delta is not None:
                         v_neg = self.forward_flow_fast(
                             xt,
@@ -1281,7 +1414,7 @@ class OptimizedLatDitRunner:
                             uncond=True,
                             cached_mid_delta=last_uncond_mid_delta,
                             mid_cache_scale=uncond_mid_sc,
-                            cached_ln_cond7=last_uncond_ln7,
+                            cached_ln_cond7=last_uncond_ln7 if need_uncond_ln7 else None,
                         )
                     else:
                         v_neg = self.forward_flow_fast(
@@ -1352,8 +1485,6 @@ class OptimizedLatDitRunner:
                 else:
                     rk_corr = torch.addmm(rk_corr, v_pos, b_pos_t)
 
-            prev_v_pos = v_pos
-
             # Optional learned per-step calibration from distillation
             if self.step_calibration is not None:
                 scales = self.step_calibration.get("scales")
@@ -1385,13 +1516,28 @@ class OptimizedLatDitRunner:
                     if acc_vec is not None:
                         v_step = torch.addcmul(v_step, v - 2.0 * prev_v + prev2_v, acc_vec, value=1.0)
                     else:
-                        # HiCache Dual-Scaled Hermite 2nd-Order Velocity Forecast + Faster-TRELLIS Directional Gate
+                        # HiCache Dual-Scaled Hermite 2nd-Order Velocity Forecast + Zero-Sync GPU Directional Gate
                         hermite_sigma = float(getattr(self.solver_config, "hicache_hermite_sigma", 0.18))
                         if hermite_sigma > 0.0:
                             dv_cur = v - prev_v
                             dv_prev = prev_v - prev2_v
-                            if float((dv_cur * dv_prev).mean().item()) > 0.0:
-                                v_step = v_step + (0.5 * hermite_sigma * hermite_sigma) * (dv_cur - dv_prev)
+                            dir_gate = ((dv_cur * dv_prev).sum() > 0).to(v_step.dtype)
+                            v_step = torch.addcmul(
+                                v_step,
+                                dv_cur - dv_prev,
+                                dir_gate,
+                                value=0.5 * hermite_sigma * hermite_sigma,
+                            )
+
+                if (
+                    (not apply_rk_readout)
+                    and (not eval_cond)
+                    and erta_alpha > 0.0
+                    and prev_v_pos is not None
+                ):
+                    # ERTACache Euler Trajectory Error-Adjustment (ICLR 2026, bytedance/ERTACache):
+                    # Compensate accumulated caching truncation error on skipped conditioning steps!
+                    v_step = v_step + erta_alpha * (v_pos - prev_v_pos)
 
                 dt_scale = 1.0
                 if apply_rk_readout and step_idx < len(self.solver_config.qaoa_dt_scales):
@@ -1405,6 +1551,7 @@ class OptimizedLatDitRunner:
                 v_step = v
                 dt_eff = dt
 
+            prev_v_pos = v_pos
             prev2_v = prev_v
             prev_v = v
             prev_dt = dt
@@ -1430,8 +1577,12 @@ class OptimizedLatDitRunner:
             if kerr_vec is not None:
                 xt = torch.addcmul(xt, xt * xt * xt, kerr_vec, value=1.0)
 
-        # Unpermute back to original vox_idxs order and denormalize once
+        # Unpermute back to original vox_idxs order and denormalize once (zero-op when std==1, mean==0, scale==1)
         xt_orig = xt[geom["up_widx"]]
-        xt_denorm = (xt_orig * self._std_f32 + self._mean_f32) * self.latent_scale
+        xt_denorm = (
+            xt_orig
+            if self._is_identity_denorm
+            else torch.addcmul(self._denorm_shift, xt_orig, self._denorm_scale)
+        )
 
         return [xt_denorm[lay] for lay in geom["layout"]]
