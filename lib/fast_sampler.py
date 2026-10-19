@@ -28,13 +28,14 @@ class SolverConfig:
     cache_cond_block7_stride: int = 2
     eval_cond_steps: List[int] = field(default_factory=lambda: [0, 2])
     eval_uncond_steps: List[int] = field(default_factory=lambda: [0, 2])
-    # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum)
+    # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
     qaoa_t_eval_shifts: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
     qaoa_dt_scales: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 1.0])
     qaoa_cfg_scales: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 0.0])
-    qaoa_momentum: List[float] = field(default_factory=lambda: [0.0, 0.08, 0.06, 0.0])
+    qaoa_momentum: List[float] = field(default_factory=lambda: [0.0, 0.04, 0.04, 0.0])
+    qaoa_step_channel_scales: List[List[float]] = field(default_factory=list)
     qaoa_channel_scale: List[float] = field(default_factory=lambda: [1.0] * 16)
     qaoa_channel_bias: List[float] = field(default_factory=lambda: [0.0] * 16)
     precompute_static_geometry: bool = True

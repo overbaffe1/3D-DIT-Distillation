@@ -783,7 +783,19 @@ class OptimizedLatDitRunner:
 
             prev_v = v
             prev_dt = dt
-            xt = xt - dt_eff * v_step
+            if (
+                use_qaoa
+                and step_idx < len(self.solver_config.qaoa_step_channel_scales)
+                and len(self.solver_config.qaoa_step_channel_scales[step_idx]) == self.latent_dim
+            ):
+                ch_vec = torch.tensor(
+                    self.solver_config.qaoa_step_channel_scales[step_idx],
+                    device=device,
+                    dtype=xt.dtype,
+                ).view(1, -1)
+                xt = torch.addcmul(xt, v_step, ch_vec, value=-dt_eff)
+            else:
+                xt = xt - dt_eff * v_step
 
         # Optional QAOA per-channel output calibration
         if use_qaoa and len(self.solver_config.qaoa_channel_scale) == self.latent_dim:
