@@ -571,8 +571,12 @@ class OptimizedLatDitRunner:
         mid_end = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
         can_mid_cache = (0 < mid_start < mid_end)
         use_freqca_crf = can_mid_cache and (mid_end == num_blocks) and bool(getattr(self.solver_config, "freqca_crf_cache", True))
+        use_subblock_crf = use_freqca_crf and bool(getattr(self.solver_config, "dbcache_foca_subblock_crf", True))
+        foca_gamma = float(getattr(self.solver_config, "foca_fn_heun_gamma", 0.12))
+        x_patchify = x
         x_mid_in: Optional[torch.Tensor] = None
         x_b0_msa: Optional[torch.Tensor] = None
+        x_b0_cr: Optional[torch.Tensor] = None
         cond_mid_in: Optional[torch.Tensor] = None
         mid_delta_out: Optional[torch.Tensor] = None
         cond_delta_out: Optional[torch.Tensor] = None
@@ -637,12 +641,24 @@ class OptimizedLatDitRunner:
                         and self._last_pos_crf_after_b0_msa.shape == (N, D)
                         and self._last_pos_crf_after_b0_msa.device == device
                     ):
-                        # FreqCa CRF (NeurIPS 2026) on fast pos steps (1, 3): apply full cumulative residual
-                        # from `x_after_b0_msa` to `x_after_23` and jump straight to final layer!
+                        # FreqCa CRF (NeurIPS 2026) + DBCache-FoCa Heun Calibrator (vipshop/cache-dit 2026)
+                        # on fast pos steps (1, 3): apply cumulative residual + Heun first-block increment!
+                        cur_fn_res = x - x_patchify
                         x = x + self._last_pos_crf_after_b0_msa * float(mid_cache_scale)
+                        if (
+                            use_subblock_crf
+                            and foca_gamma > 0.0
+                            and getattr(self, "_last_b0_fn_res", None) is not None
+                            and self._last_b0_fn_res.shape == (N, D)
+                        ):
+                            x = x + foca_gamma * (cur_fn_res - self._last_b0_fn_res)
                         break
                     else:
                         x_b0_msa = x
+                        if use_subblock_crf:
+                            self._last_b0_fn_res = x - x_patchify
+                            if cached_mid_delta is None:
+                                self._last_b0_fn_res_step0 = self._last_b0_fn_res
 
             # --- 2. Conditioning Self-Attention + Cross-Attention ---
             if block.cond:
@@ -828,6 +844,29 @@ class OptimizedLatDitRunner:
                     )
                     x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
 
+            if b_idx == 0 and (not uncond) and use_subblock_crf:
+                if cached_mid_delta is not None and (
+                    getattr(self, "_last_pos_crf_after_b0_cr", None) is not None
+                    and self._last_pos_crf_after_b0_cr.shape == (N, D)
+                    and self._last_pos_crf_after_b0_cr.device == device
+                ):
+                    # DBCache-FoCa Subblock-2 CRF (vipshop/cache-dit 2026 + FreqCa NeurIPS 2026):
+                    # On Step 2 (pos), after updating 3D MSA + DINO Cross-Attn in Block 0,
+                    # bypass Block 0's heavy FFN0(1536->8192) + 3x3x3 SparseConv + FFN1 and Blocks 1..23!
+                    x = x + self._last_pos_crf_after_b0_cr * float(mid_cache_scale)
+                    if (
+                        foca_gamma > 0.0
+                        and x_b0_msa is not None
+                        and getattr(self, "_last_b0_fn_res_step0", None) is not None
+                        and self._last_b0_fn_res_step0.shape == (N, D)
+                    ):
+                        x = x + foca_gamma * ((x_b0_msa - x_patchify) - self._last_b0_fn_res_step0)
+                    if x_b0_msa is not None:
+                        self._last_pos_crf_after_b0_msa = x - x_b0_msa
+                    break
+                else:
+                    x_b0_cr = x
+
             # --- 3. Main FFN + 3D Submanifold Sparse Conv + SwiGLU ---
             h_mlp = fast_modulate(x, sizes, s_mlp, sh_mlp)
             h_mlp = block.ffn0(h_mlp)
@@ -843,6 +882,8 @@ class OptimizedLatDitRunner:
                 mid_delta_out = x - x_mid_in
                 if (not uncond) and use_freqca_crf and x_b0_msa is not None:
                     self._last_pos_crf_after_b0_msa = x - x_b0_msa
+                if (not uncond) and use_subblock_crf and x_b0_cr is not None:
+                    self._last_pos_crf_after_b0_cr = x - x_b0_cr
 
         # Output LayerNorm + exact FP32 Unpatchify projection (zero BF16 output truncation)
         x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
@@ -990,6 +1031,13 @@ class OptimizedLatDitRunner:
         b_init_t = qt.get("b_init_t") if apply_rk_readout else None
         if b_init_t is not None:
             rk_corr = xt @ b_init_t
+
+        self._last_b0_x_after_msa = None
+        self._last_b0_cr_proj = None
+        self._last_pos_crf_after_b0_msa = None
+        self._last_pos_crf_after_b0_cr = None
+        self._last_b0_fn_res = None
+        self._last_b0_fn_res_step0 = None
 
         for step_idx in range(total_steps):
             t_val = float(t_list[step_idx])

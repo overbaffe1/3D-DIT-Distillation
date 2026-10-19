@@ -695,12 +695,14 @@ class CalibratedTeacherEnsemble:
         b0_msa_share = bool(cfg.get("ditfastattn_b0_msa_share", True))
         pab_cr_bcast = bool(cfg.get("pab_cross_attn_broadcast", True))
         freqca_crf = bool(cfg.get("freqca_crf_cache", True))
+        subblock_crf = freqca_crf and bool(cfg.get("dbcache_foca_subblock_crf", True))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         active_dino_ratio = (
             (0.42 * max(1, min(8, mid_start)) / 8.0 if foca_dbe else max(1, min(8, mid_start)) / 8.0)
             if mid_cache_enabled
             else 1.0
         )
+        cond_refresh_vox_factor = 0.30 if subblock_crf else 0.66
         fast_pos_factor = 0.22 if freqca_crf else (0.46 if pab_cr_bcast else 0.66)
         fast_neg_factor = 0.04 if (freqca_crf and b0_msa_share) else (0.12 if (foca_dbe and b0_msa_share) else 0.34)
         step0_pos_cost = (0.34 * (5.0 / 8.0) + 0.66 * (7.0 / 24.0)) if step0_striding else 1.00
@@ -709,7 +711,7 @@ class CalibratedTeacherEnsemble:
             if (step0_striding and b0_msa_share)
             else ((0.34 * (4.0 / 24.0)) if step0_striding else 0.34)
         )
-        fixed_overhead = 0.068 if (freqca_crf and b0_msa_share and pab_cr_bcast) else 0.11
+        fixed_overhead = 0.056 if subblock_crf else (0.068 if (freqca_crf and b0_msa_share and pab_cr_bcast) else 0.11)
 
         n_full_pos = sum(1 for k in range(total_steps) if k in eval_cond_steps)
         n_pos_all24 = 1 if (mid_cache_enabled and n_full_pos >= 1) else n_full_pos
@@ -751,7 +753,7 @@ class CalibratedTeacherEnsemble:
 
         eff_nfe = (
             step0_pos_cost * n_pos_all24
-            + (0.34 * active_dino_ratio + 0.66 * active_vox_ratio) * n_pos_cond_refresh
+            + (0.34 * active_dino_ratio + cond_refresh_vox_factor * active_vox_ratio) * n_pos_cond_refresh
             + (fast_pos_factor * active_vox_ratio) * n_fast_pos
             + step0_neg_cost * n_full_neg
             + (fast_neg_factor * active_vox_ratio) * n_fast_neg
@@ -1140,6 +1142,8 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "ditfastattn_b0_msa_share": True,
         "pab_cross_attn_broadcast": True,
         "freqca_crf_cache": True,
+        "dbcache_foca_subblock_crf": True,
+        "foca_fn_heun_gamma": 0.12,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1212,6 +1216,8 @@ def run_qaoa_optimization(
             best_cfg["ditfastattn_b0_msa_share"] = True
             best_cfg["pab_cross_attn_broadcast"] = True
             best_cfg["freqca_crf_cache"] = True
+            best_cfg["dbcache_foca_subblock_crf"] = True
+            best_cfg["foca_fn_heun_gamma"] = 0.12
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)

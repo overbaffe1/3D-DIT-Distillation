@@ -3120,5 +3120,7 @@
   "foca_dead_branch_elim": true,
   "ditfastattn_b0_msa_share": true,
   "pab_cross_attn_broadcast": true,
-  "freqca_crf_cache": true
+  "freqca_crf_cache": true,
+  "dbcache_foca_subblock_crf": true,
+  "foca_fn_heun_gamma": 0.12
 }

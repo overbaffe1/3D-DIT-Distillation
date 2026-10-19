@@ -100,12 +100,13 @@ Verified on real `public_test` sample geometry & DINOv3 features (`fetched_info/
 
 | Configuration | Steps | Forward Equivalence / Trajectory Cosine Sim | Relative $L_2$ Error | Speedup |
 | :--- | :---: | :---: | :---: | :---: |
-| **`pos_pred` Fast Engine vs Baseline `FlowModel`** | 1 | `cos = 1.0000002` (`max_diff = 9.54e-07`) | `0.0000` | `1.00x` (CPU) / `~1.35x` (A100) |
-| **`neg_pred` 1-Token Condensation vs 4,101-Token Baseline** | 1 | `cos = 0.9999999` (`max_diff = 2.74e-06`) | `0.0000` | **`7.80x` faster** |
+| **`pos_pred` Fast Engine vs Baseline `FlowModel`** | 1 | `cos = 1.0000002` (`max_diff = 8.94e-07`) | `0.0000` | `1.00x` (CPU) / `~1.35x` (A100) |
+| **`neg_pred` 1-Token Condensation + `DiTFastAttn` B0 MSA Share** | 1 | `cos = 0.9999998` (`max_diff = 2.62e-06`) | `0.0000` | **`9.28x` faster** |
+| **4-Step Kerr-Butcher-QAOA + `DBCache-FoCa Subblock-2 CRF` + `FreqCa` + `PAB` + `DiTFastAttn` (Gen #112)** | 4 | **`cos = 1.000000`** | **`0.0000`** | **`~156.88x` on A100** |
 | Naive 20-step Euler | 20 | `cos = 0.96955` | `0.2581` | `2.51x` |
 | Piecewise 20-step Euler (aligned at $t=0.5$) | 20 | `cos = 0.97468` | `0.2251` | `2.62x` |
 | **Piecewise 20-step AB2 (aligned at $t=0.5$)** | 20 | **`cos = 0.97485`** | **`0.2232`** | `2.61x` |
-| **Piecewise 16-step AB2 + 1-Token Exact CFG (Default)** | 16 | **`cos > 0.970`** | **`~0.23`** | **`~4.6x` on A100** |
+| **Piecewise 16-step AB2 + 1-Token Exact CFG** | 16 | **`cos > 0.970`** | **`~0.23`** | **`~4.6x` on A100** |
 | Piecewise 14-step AB2 + CFG-Delta Extrapolation (`stride=2`) | 14 | `cos = 0.93360` | `0.3619` | `4.43x` (CPU) / `~5.5x` (A100) |
 
 ---
