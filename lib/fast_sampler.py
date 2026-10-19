@@ -30,8 +30,9 @@ class SolverConfig:
     eval_uncond_steps: List[int] = field(default_factory=lambda: [0, 2])
     mid_block_cache_enabled: bool = True
     mid_block_start: int = 8
-    mid_block_end: int = 20
+    mid_block_end: int = 23
     uncond_mid_block_cache: bool = True
+    single_dino_cond_pass: bool = False
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

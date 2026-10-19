@@ -539,7 +539,7 @@ class OptimizedLatDitRunner:
 
         num_blocks = len(self.flow.blocks)
         mid_start = int(getattr(self.solver_config, "mid_block_start", 8))
-        mid_end = int(getattr(self.solver_config, "mid_block_end", 20))
+        mid_end = int(getattr(self.solver_config, "mid_block_end", 23))
         can_mid_cache = (mid_start >= self.cond_depth) and (mid_end <= num_blocks) and (mid_start < mid_end)
         x_mid_in: Optional[torch.Tensor] = None
         mid_delta_out: Optional[torch.Tensor] = None
@@ -549,6 +549,8 @@ class OptimizedLatDitRunner:
                 if cached_mid_delta is not None and mid_start <= b_idx < mid_end:
                     if b_idx == mid_start:
                         x = x + cached_mid_delta * float(mid_cache_scale)
+                    if kv_cc_cache_out is not None:
+                        kv_cc_cache_out.append(None)
                     continue
                 if return_mid_delta and b_idx == mid_start:
                     x_mid_in = x
@@ -849,6 +851,7 @@ class OptimizedLatDitRunner:
         rk_corr: Optional[torch.Tensor] = None
         use_mid_cache = bool(getattr(self.solver_config, "mid_block_cache_enabled", False))
         use_uncond_mid_cache = use_mid_cache and bool(getattr(self.solver_config, "uncond_mid_block_cache", True))
+        single_dino_pass = bool(getattr(self.solver_config, "single_dino_cond_pass", True))
         mid_scales = getattr(self.solver_config, "qaoa_mid_cache_scales", [])
         uncond_mid_sc = float(getattr(self.solver_config, "qaoa_uncond_mid_scale", 0.95))
 
@@ -884,6 +887,20 @@ class OptimizedLatDitRunner:
                     uncond=False,
                     cached_cond_block7=last_cond7,
                     cached_mid_delta=last_mid_delta if use_mid_cache else None,
+                    mid_cache_scale=mid_sc,
+                )
+            elif need_cond_cache and use_mid_cache and (last_mid_delta is not None):
+                # Step 2+: refresh 8-block DINO conditioning (0..7) at new t_eval while skipping
+                # the 15 middle voxel blocks (8..22) via calibrated Mid-Block Residual DeepCache!
+                v_pos, last_cond7 = self.forward_flow_fast(
+                    xt,
+                    t_eval,
+                    context,
+                    clf_token,
+                    geom,
+                    uncond=False,
+                    return_cond_block7=True,
+                    cached_mid_delta=last_mid_delta,
                     mid_cache_scale=mid_sc,
                 )
             elif need_cond_cache and use_mid_cache:

@@ -349,6 +349,7 @@ class CalibratedTeacherEnsemble:
         eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
         mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
         uncond_mid_cache = mid_cache_enabled and bool(cfg.get("uncond_mid_block_cache", True))
+        single_dino_pass = bool(cfg.get("single_dino_cond_pass", True))
         mid_scales = cfg.get("qaoa_mid_cache_scales", [1.0] * total_steps)
         uncond_mid_sc = float(cfg.get("qaoa_uncond_mid_scale", 0.955))
 
@@ -386,10 +387,14 @@ class CalibratedTeacherEnsemble:
                 prev_v = None
                 prev2_v = None
 
+            m_sc = (
+                float(mid_scales[step_idx])
+                if (mid_cache_enabled and step_idx > 0 and step_idx < len(mid_scales))
+                else None
+            )
             if step_idx in eval_cond_steps or last_cond_state is None:
-                v_pos, last_cond_state = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, None, None)
+                v_pos, last_cond_state = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, None, m_sc)
             else:
-                m_sc = float(mid_scales[step_idx]) if (mid_cache_enabled and step_idx < len(mid_scales)) else None
                 v_pos, _ = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, last_cond_state, m_sc)
 
             if is_guided[step_idx] and guidance_scale > 0.0:
@@ -560,6 +565,7 @@ class CalibratedTeacherEnsemble:
         eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
         mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
         uncond_mid_cache = mid_cache_enabled and bool(cfg.get("uncond_mid_block_cache", True))
+        single_dino_pass = bool(cfg.get("single_dino_cond_pass", True))
         mid_scales = cfg.get("qaoa_mid_cache_scales", [1.0] * total_steps)
         uncond_mid_sc = float(cfg.get("qaoa_uncond_mid_scale", 0.955))
 
@@ -584,10 +590,14 @@ class CalibratedTeacherEnsemble:
                 prev_v = None
                 prev2_v = None
 
+            m_sc = (
+                float(mid_scales[step_idx])
+                if (mid_cache_enabled and step_idx > 0 and step_idx < len(mid_scales))
+                else None
+            )
             if step_idx in eval_cond_steps or last_cond_state is None:
-                v_pos, last_cond_state = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, None, None)
+                v_pos, last_cond_state = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, None, m_sc)
             else:
-                m_sc = float(mid_scales[step_idx]) if (mid_cache_enabled and step_idx < len(mid_scales)) else None
                 v_pos, _ = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, last_cond_state, m_sc)
 
             v_pos_stages.append(v_pos)
@@ -679,10 +689,12 @@ class CalibratedTeacherEnsemble:
         mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
         uncond_mid_cache = mid_cache_enabled and bool(cfg.get("uncond_mid_block_cache", True))
         mid_start = int(cfg.get("mid_block_start", 8))
-        mid_end = int(cfg.get("mid_block_end", 20))
+        mid_end = int(cfg.get("mid_block_end", 23))
         active_block_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
 
         n_full_pos = sum(1 for k in range(total_steps) if k in eval_cond_steps)
+        n_pos_all24 = 1 if (mid_cache_enabled and n_full_pos >= 1) else n_full_pos
+        n_pos_cond_refresh = max(0, n_full_pos - n_pos_all24)
         n_fast_pos = total_steps - n_full_pos
         n_neg_1tok = sum(1 for k in range(n_guided) if k in eval_uncond_steps)
         n_full_neg = (1 if n_neg_1tok >= 1 else 0) if uncond_mid_cache else n_neg_1tok
@@ -719,7 +731,8 @@ class CalibratedTeacherEnsemble:
         rmse = total_rmse / S
 
         eff_nfe = (
-            1.00 * n_full_pos
+            1.00 * n_pos_all24
+            + (0.34 + 0.66 * active_block_ratio) * n_pos_cond_refresh
             + (0.66 * active_block_ratio) * n_fast_pos
             + 0.34 * n_full_neg
             + (0.34 * active_block_ratio) * n_fast_neg
@@ -1095,8 +1108,9 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "eval_uncond_steps": eval_uncond,
         "mid_block_cache_enabled": True,
         "mid_block_start": 8,
-        "mid_block_end": 20,
+        "mid_block_end": 23,
         "uncond_mid_block_cache": True,
+        "single_dino_cond_pass": False,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1158,8 +1172,9 @@ def run_qaoa_optimization(
             best_cfg["eval_uncond_steps"] = [0, 2]
             best_cfg["mid_block_cache_enabled"] = True
             best_cfg["mid_block_start"] = 8
-            best_cfg["mid_block_end"] = 20
+            best_cfg["mid_block_end"] = 23
             best_cfg["uncond_mid_block_cache"] = True
+            best_cfg["single_dino_cond_pass"] = False
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)
