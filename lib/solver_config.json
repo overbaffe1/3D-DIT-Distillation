@@ -3124,5 +3124,8 @@
   "dbcache_foca_subblock_crf": true,
   "foca_fn_heun_gamma": 0.12,
   "hetcache_b0_cond_msa_reuse": true,
-  "autotarget_clean_endpoint_blend": 0.08
+  "autotarget_clean_endpoint_blend": 0.08,
+  "pab_step2_cr_gate_broadcast": true,
+  "barycache_crf_beta": 0.1,
+  "hilbert_qmc_uncond_stride": 4
 }

@@ -569,7 +569,10 @@ class OptimizedLatDitRunner:
         use_freqca_crf = can_mid_cache and (mid_end == num_blocks) and bool(getattr(self.solver_config, "freqca_crf_cache", True))
         use_subblock_crf = use_freqca_crf and bool(getattr(self.solver_config, "dbcache_foca_subblock_crf", True))
         use_hetcache_b0 = bool(getattr(self.solver_config, "hetcache_b0_cond_msa_reuse", True))
+        use_pab_step2 = use_subblock_crf and bool(getattr(self.solver_config, "pab_step2_cr_gate_broadcast", True))
         foca_gamma = float(getattr(self.solver_config, "foca_fn_heun_gamma", 0.12))
+        bary_beta = float(getattr(self.solver_config, "barycache_crf_beta", 0.10))
+        qmc_stride = int(getattr(self.solver_config, "hilbert_qmc_uncond_stride", 4))
 
         if reuse_b0_msa:
             x = self._last_b0_x_after_msa
@@ -592,7 +595,22 @@ class OptimizedLatDitRunner:
             x = F.linear(xt_sorted.to(dtype=compute_dtype), self.flow.patchify.weight.to(dtype=compute_dtype))
 
         use_1tok_uncond = uncond and self.solver_config.uncond_1token_condensation and (batch_size == 1)
-        if use_1tok_uncond:
+        skip_cond_alloc = (
+            (not uncond)
+            and use_freqca_crf
+            and (cached_mid_delta is not None)
+            and (
+                (cached_cond_block7 is not None and getattr(self, "_last_pos_crf_after_b0_msa", None) is not None)
+                or (
+                    use_pab_step2
+                    and getattr(self, "_last_b0_cr_proj", None) is not None
+                    and getattr(self, "_last_pos_crf_after_b0_cr", None) is not None
+                )
+            )
+        )
+        if skip_cond_alloc:
+            cond = context
+        elif use_1tok_uncond:
             cond = torch.zeros(1, 1, D, device=device, dtype=compute_dtype)
         elif uncond:
             cond = torch.zeros_like(context, dtype=compute_dtype)
@@ -600,7 +618,8 @@ class OptimizedLatDitRunner:
             cond = context.to(dtype=compute_dtype)
 
         ln_cond_after_7: Optional[torch.Tensor] = cached_ln_cond7
-        kv_cc_cache_out: Optional[List[torch.Tensor]] = [] if return_cond_block7 else None
+        need_full_kv_cc = return_cond_block7 and not (use_freqca_crf and use_subblock_crf)
+        kv_cc_cache_out: Optional[List[torch.Tensor]] = [] if need_full_kv_cc else ([None] if return_cond_block7 else None)
         use_triton = self.solver_config.use_fused_triton_kernels
 
         x_patchify = x
@@ -672,9 +691,18 @@ class OptimizedLatDitRunner:
                         and self._last_pos_crf_after_b0_msa.device == device
                     ):
                         # FreqCa CRF (NeurIPS 2026) + DBCache-FoCa Heun Calibrator (vipshop/cache-dit 2026)
-                        # on fast pos steps (1, 3): apply cumulative residual + Heun first-block increment!
+                        # + BaryCache/L2P-Cache 2-Anchor Extrapolation (arXiv:2608.28670 / CVPR 2026) on fast pos steps (1, 3):
                         cur_fn_res = x - x_patchify
-                        x = x + self._last_pos_crf_after_b0_msa * float(mid_cache_scale)
+                        crf_base = self._last_pos_crf_after_b0_msa
+                        crf_s0 = getattr(self, "_last_pos_crf_after_b0_msa_step0", None)
+                        if (
+                            bary_beta > 0.0
+                            and crf_s0 is not None
+                            and crf_s0 is not crf_base
+                            and crf_s0.shape == (N, D)
+                        ):
+                            crf_base = (1.0 + bary_beta) * crf_base - bary_beta * crf_s0
+                        x = x + crf_base * float(mid_cache_scale)
                         if (
                             use_subblock_crf
                             and foca_gamma > 0.0
@@ -689,6 +717,30 @@ class OptimizedLatDitRunner:
                             self._last_b0_fn_res = x - x_patchify
                             if cached_mid_delta is None:
                                 self._last_b0_fn_res_step0 = self._last_b0_fn_res
+                        if (
+                            use_pab_step2
+                            and cached_mid_delta is not None
+                            and getattr(self, "_last_b0_cr_proj", None) is not None
+                            and self._last_b0_cr_proj.shape == (N, D)
+                            and self._last_b0_cr_proj.device == device
+                            and getattr(self, "_last_pos_crf_after_b0_cr", None) is not None
+                            and self._last_pos_crf_after_b0_cr.shape == (N, D)
+                            and self._last_pos_crf_after_b0_cr.device == device
+                        ):
+                            # PAB + T-GATE Step-2 Cross-Attention Gate Broadcast + Subblock-2 CRF:
+                            # Apply cached Block-0 cross-attn projection with Step-2 gate `g_cr(t_2)`,
+                            # fuse Subblock-2 CRF + FoCa Heun increment, refresh `_last_pos_crf_after_b0_msa`,
+                            # and bypass Block-0 DINO Self-Attn, Cross-Attn, FFN+SparseConv3D, and Blocks 1..23!
+                            x = fast_gate_add(x, self._last_b0_cr_proj, sizes, g_cr)
+                            x = x + self._last_pos_crf_after_b0_cr * float(mid_cache_scale)
+                            if (
+                                foca_gamma > 0.0
+                                and getattr(self, "_last_b0_fn_res_step0", None) is not None
+                                and self._last_b0_fn_res_step0.shape == (N, D)
+                            ):
+                                x = x + foca_gamma * ((x_b0_msa - x_patchify) - self._last_b0_fn_res_step0)
+                            self._last_pos_crf_after_b0_msa = x - x_b0_msa
+                            break
 
             # --- 2. Conditioning Self-Attention + Cross-Attention ---
             if block.cond:
@@ -728,15 +780,33 @@ class OptimizedLatDitRunner:
 
                     if not skip_cond_out:
                         # cond -> x only needed if subsequent blocks read `cond` (must use `x` before gate_add!)
-                        h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                        if return_mid_delta and batch_size == 1 and N >= 64 and qmc_stride > 1:
+                            # Hilbert-Curve QMC Strided Reverse Cross-Attention (MC-Sparse arXiv:2610.06801 / JiT CVPR 2026):
+                            # Since 3D voxels `x` are ordered along a continuous Hilbert space-filling curve,
+                            # strided subsampling `x[::qmc_stride]` forms a quasi-Monte Carlo quadrature for the
+                            # 1-token global softmax pooling `cond -> x`, cutting 75% of reverse cross-attn FLOPs!
+                            x_sub = x[::qmc_stride]
+                            n_sub = x_sub.shape[0]
+                            h_x = fast_modulate(x_sub, [n_sub], s_cr, sh_cr)
+                            q_seq_use = geom.get(f"q_seqlens_qmc_{qmc_stride}")
+                            if q_seq_use is None:
+                                q_seq_use = torch.tensor([0, n_sub], device=device, dtype=torch.int32)
+                                geom[f"q_seqlens_qmc_{qmc_stride}"] = q_seq_use
+                            q_max_use = n_sub
+                        else:
+                            n_sub = N
+                            h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                            q_seq_use = q_seqlens
+                            q_max_use = q_maxlen
+
                         kv_w = getattr(block, "_to_kv_cross_w", None)
                         if kv_w is not None:
-                            kv_x = F.linear(h_x, kv_w, getattr(block, "_to_kv_cross_b", None)).view(N, 2, H, HD)
+                            kv_x = F.linear(h_x, kv_w, getattr(block, "_to_kv_cross_b", None)).view(n_sub, 2, H, HD)
                         else:
-                            kv_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 1:]
+                            kv_x = block.to_qkv_cross(h_x).view(n_sub, 3, H, HD)[:, 1:]
 
                         h_c_cross = flash_cross_attn(
-                            q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seqlens, q_maxlen
+                            q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seq_use, q_max_use
                         )
                         cond = cond + block.cond_to_out_cross(h_c_cross.view(1, 1, D)) * cg_cr[:, None]
 
@@ -818,7 +888,7 @@ class OptimizedLatDitRunner:
                     else:
                         qkv_cc_cr = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)
                         kv_cc = qkv_cc_cr[:, 1:]
-                    if kv_cc_cache_out is not None:
+                    if need_full_kv_cc and kv_cc_cache_out is not None:
                         kv_cc_cache_out.append(kv_cc)
 
                     if skip_cond_out:
@@ -901,7 +971,7 @@ class OptimizedLatDitRunner:
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
                     kv_cc = block.cond_to_kv_cross(h_cond_cr).view(batch_size * L, 2, H, HD)
-                    if kv_cc_cache_out is not None:
+                    if need_full_kv_cc and kv_cc_cache_out is not None:
                         kv_cc_cache_out.append(kv_cc)
                     h_x_out = flash_cross_attn(
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
@@ -943,11 +1013,16 @@ class OptimizedLatDitRunner:
             x = fast_gate_add(x, h_mlp, sizes, g_mlp)
 
             if can_mid_cache and b_idx == (mid_end - 1) and return_mid_delta and x_mid_in is not None:
-                mid_delta_out = x - x_mid_in
                 if (not uncond) and use_freqca_crf and x_b0_msa is not None:
                     self._last_pos_crf_after_b0_msa = x - x_b0_msa
+                    if cached_mid_delta is None:
+                        self._last_pos_crf_after_b0_msa_step0 = self._last_pos_crf_after_b0_msa
                 if (not uncond) and use_subblock_crf and x_b0_cr is not None:
                     self._last_pos_crf_after_b0_cr = x - x_b0_cr
+                if (not uncond) and use_subblock_crf and getattr(self, "_last_pos_crf_after_b0_msa", None) is not None:
+                    mid_delta_out = self._last_pos_crf_after_b0_msa
+                else:
+                    mid_delta_out = x - x_mid_in
 
         # Output LayerNorm + exact FP32 Unpatchify projection (zero BF16 output truncation)
         x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
@@ -1100,6 +1175,7 @@ class OptimizedLatDitRunner:
         self._last_b0_cr_proj = None
         self._last_b0_cond_msa_out = None
         self._last_pos_crf_after_b0_msa = None
+        self._last_pos_crf_after_b0_msa_step0 = None
         self._last_pos_crf_after_b0_cr = None
         self._last_b0_fn_res = None
         self._last_b0_fn_res_step0 = None
