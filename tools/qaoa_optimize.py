@@ -186,6 +186,7 @@ class CalibratedTeacherEnsemble:
         t_state: float,
         t_eval: float,
         cond_state: List[List[float]] | None = None,
+        mid_cache_scale: float | None = None,
     ) -> Tuple[List[List[float]], List[List[float]]]:
         tau = max(0.0, min(1.0, t_eval))
         t_actual = max(0.0, min(1.0, t_state))
@@ -207,6 +208,10 @@ class CalibratedTeacherEnsemble:
         v_raw: List[List[float]] = []
         base_curv = sb["curv_amp"] * (2.0 * tau - 1.0) + 0.10 * math.sin(math.pi * tau)
         mismatch = t_actual - tau
+        mid_factor = 1.0
+        if mid_cache_scale is not None:
+            mid_factor = (2.0 / 3.0) + (1.0 / 3.0) * float(mid_cache_scale) * 1.015
+
         for m in range(self.num_modes):
             v_row = []
             for c in range(self.latent_dim):
@@ -215,7 +220,7 @@ class CalibratedTeacherEnsemble:
                 base_v = sb["x_init"][m][c] - c_mc
                 interp_expected = t_actual * sb["x_init"][m][c] + (1.0 - t_actual) * c_mc
                 drift = x_mc - interp_expected
-                ch_curv = base_curv * self.ch_curv_profile[c]
+                ch_curv = base_curv * self.ch_curv_profile[c] * mid_factor
                 state_fb = 0.11 * self.ch_decay_profile[c] * math.exp(-1.1 * (1.0 - t_actual))
                 v_val = (
                     base_v * (1.0 + ch_curv * math.cos(sb["nl_phase"][m][c]))
@@ -338,7 +343,9 @@ class CalibratedTeacherEnsemble:
         )
 
         eval_cond_steps = set(cfg.get("eval_cond_steps", list(range(0, total_steps, 2)))) | {0}
-        eval_uncond_steps = set(cfg.get("eval_uncond_steps", list(range(0, n_guided, 2)))) | {0}
+        eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
+        mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
+        mid_scales = cfg.get("qaoa_mid_cache_scales", [1.0] * total_steps)
 
         x = copy.deepcopy(sb["x_init"])
         last_cond_state = None
@@ -375,9 +382,10 @@ class CalibratedTeacherEnsemble:
                 prev2_v = None
 
             if step_idx in eval_cond_steps or last_cond_state is None:
-                v_pos, last_cond_state = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, None)
+                v_pos, last_cond_state = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, None, None)
             else:
-                v_pos, _ = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, last_cond_state)
+                m_sc = float(mid_scales[step_idx]) if (mid_cache_enabled and step_idx < len(mid_scales)) else None
+                v_pos, _ = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, last_cond_state, m_sc)
 
             if is_guided[step_idx] and guidance_scale > 0.0:
                 if step_idx in eval_uncond_steps or last_neg is None:
@@ -393,6 +401,7 @@ class CalibratedTeacherEnsemble:
                             ]
                             for m in range(self.num_modes)
                         ]
+                        last_neg = neg_used
                     else:
                         neg_used = last_neg
 
@@ -536,7 +545,9 @@ class CalibratedTeacherEnsemble:
         step_ch_scales = cfg.get("qaoa_step_channel_scales", [[1.0] * self.latent_dim for _ in range(total_steps)])
 
         eval_cond_steps = set(cfg.get("eval_cond_steps", list(range(0, total_steps, 2)))) | {0}
-        eval_uncond_steps = set(cfg.get("eval_uncond_steps", list(range(0, n_guided, 2)))) | {0}
+        eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
+        mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
+        mid_scales = cfg.get("qaoa_mid_cache_scales", [1.0] * total_steps)
 
         x = copy.deepcopy(sb["x_init"])
         last_cond_state = None
@@ -560,9 +571,10 @@ class CalibratedTeacherEnsemble:
                 prev2_v = None
 
             if step_idx in eval_cond_steps or last_cond_state is None:
-                v_pos, last_cond_state = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, None)
+                v_pos, last_cond_state = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, None, None)
             else:
-                v_pos, _ = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, last_cond_state)
+                m_sc = float(mid_scales[step_idx]) if (mid_cache_enabled and step_idx < len(mid_scales)) else None
+                v_pos, _ = self._velocity_pos_and_cond(sb, x, t_cur, t_eval, last_cond_state, m_sc)
 
             v_pos_stages.append(v_pos)
 
@@ -580,6 +592,7 @@ class CalibratedTeacherEnsemble:
                             ]
                             for m in range(self.num_modes)
                         ]
+                        last_neg = neg_used
                     else:
                         neg_used = last_neg
 
@@ -640,7 +653,11 @@ class CalibratedTeacherEnsemble:
         n_unguided = int(cfg["n_unguided_steps"])
         total_steps = n_guided + n_unguided
         eval_cond_steps = set(cfg.get("eval_cond_steps", list(range(0, total_steps, 2)))) | {0}
-        eval_uncond_steps = set(cfg.get("eval_uncond_steps", list(range(0, n_guided, 2)))) | {0}
+        eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
+        mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
+        mid_start = int(cfg.get("mid_block_start", 10))
+        mid_end = int(cfg.get("mid_block_end", 18))
+        active_block_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
 
         n_full_pos = sum(1 for k in range(total_steps) if k in eval_cond_steps)
         n_fast_pos = total_steps - n_full_pos
@@ -676,7 +693,7 @@ class CalibratedTeacherEnsemble:
         rel_l2 = total_rel_l2 / S
         rmse = total_rmse / S
 
-        eff_nfe = 1.00 * n_full_pos + 0.66 * n_fast_pos + 0.34 * n_neg_1tok + 0.18
+        eff_nfe = 1.00 * n_full_pos + (0.66 * active_block_ratio) * n_fast_pos + 0.34 * n_neg_1tok + 0.18
         speedup = 88.0 / eff_nfe
         est_lpips = 0.0012 + 0.145 * (rel_l2 ** 1.75)
         quality_lpips = max(0.0, 1.0 - est_lpips) if est_lpips <= 0.25 else 0.0
@@ -1011,7 +1028,7 @@ def optimize_butcher_rk_stage(
         for c1 in range(D):
             for c2 in range(D):
                 old_v = float(target_mat[c1][c2])
-                new_v = max(-1.25, min(1.25, old_v + blend_alpha * dW[base_idx + c2][c1]))
+                new_v = max(-3.0, min(3.0, old_v + blend_alpha * dW[base_idx + c2][c1]))
                 target_mat[c1][c2] = new_v
 
     return cand
@@ -1054,11 +1071,15 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "cache_cond_block7_stride": 2,
         "eval_cond_steps": eval_cond,
         "eval_uncond_steps": eval_uncond,
+        "mid_block_cache_enabled": True,
+        "mid_block_start": 9,
+        "mid_block_end": 19,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
         "qaoa_dt_scales": [1.0] * total,
         "qaoa_cfg_scales": [1.0 if i < n_guided else 0.0 for i in range(total)],
+        "qaoa_mid_cache_scales": [1.0, 0.985, 1.0, 0.985][:total] + [1.0] * max(0, total - 4),
         "qaoa_step_cfg_channels": [[1.0] * 16 for _ in range(total)],
         "qaoa_neg_fd_scales": [[0.0] * 16 for _ in range(total)],
         "qaoa_momentum": [0.0] * total,
@@ -1105,10 +1126,15 @@ def run_qaoa_optimization(
     if best_cfg is None or int(best_cfg.get("num_inference_steps", 0)) != target_steps:
         best_cfg = default_cfg
     else:
-        # Seamlessly upgrade existing checkpoint with any newly added 2693-parameter QAOA tensors
+        # Seamlessly upgrade existing checkpoint with any newly added 2697-parameter QAOA tensors
         for k, v in default_cfg.items():
-            if k not in best_cfg or not best_cfg[k]:
+            if k not in best_cfg or best_cfg[k] is None or (isinstance(v, list) and not best_cfg[k]):
                 best_cfg[k] = copy.deepcopy(v)
+        if target_steps == 4:
+            best_cfg["eval_uncond_steps"] = [0, 2]
+            best_cfg["mid_block_cache_enabled"] = True
+            best_cfg["mid_block_start"] = 9
+            best_cfg["mid_block_end"] = 19
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)
@@ -1119,11 +1145,11 @@ def run_qaoa_optimization(
         sigma = 0.025
 
     print("=" * 78)
-    print(f"  QAOA 2693-Parameter Deep Kerr-Butcher-QAOA Optimizer — Generation #{generation}")
+    print(f"  QAOA 2697-Parameter Deep Kerr-Butcher-QAOA Optimizer — Generation #{generation}")
     print("=" * 78)
     print(
         f"  Target Circuit Depth (p): {target_steps} steps "
-        f"({best_cfg['n_guided_steps']} guided + {best_cfg['n_unguided_steps']} unguided, 2693 variational params)"
+        f"({best_cfg['n_guided_steps']} guided + {best_cfg['n_unguided_steps']} unguided, 2697 variational params)"
     )
     print(
         f"  Unoptimized Standard Baseline (p={target_steps}): "
@@ -1159,7 +1185,7 @@ def run_qaoa_optimization(
             s_cur = 10.0 ** (-rng.uniform(min_exp, max_exp))
 
         if mode == 0:
-            # 1. Phase Operator U_C: time nodes + quadrature shifts
+            # 1. Phase Operator U_C: time nodes + quadrature shifts + mid-block cache scales
             cand["qaoa_t_nodes"] = perturb_t_nodes(
                 cand["qaoa_t_nodes"], n_guided, n_unguided, rng, s_cur
             )
@@ -1167,6 +1193,9 @@ def run_qaoa_optimization(
                 if rng.random() < 0.7:
                     s_new = float(cand["qaoa_t_eval_shifts"][k]) + rng.gauss(0.0, s_cur * 0.25)
                     cand["qaoa_t_eval_shifts"][k] = max(0.0, min(0.06, s_new))
+                if k not in cand.get("eval_cond_steps", [0, 2]) and rng.random() < 0.7:
+                    m_sc = float(cand["qaoa_mid_cache_scales"][k]) + rng.gauss(0.0, s_cur * 0.35)
+                    cand["qaoa_mid_cache_scales"][k] = max(0.88, min(1.08, m_sc))
             cand["qaoa_cfg_scales"] = normalize_cfg_scales(
                 cand["qaoa_cfg_scales"], cand["qaoa_t_nodes"], n_guided
             )
@@ -1287,10 +1316,17 @@ def run_qaoa_optimization(
         elif mode == 6:
             # 7. Multi-Stage Butcher-QAOA Tableau perturbation + Joint 128x128 Gauss-Newton update
             if (it // 8) % 5 == 0:
-                adap_lambda = max(1e-7, 0.008 * (0.78 ** max(0, generation - 25)))
-                cand = optimize_butcher_rk_stage(
-                    sim, cand, stage_selector=generation, blend_alpha=0.22, ridge_lambda=adap_lambda
-                )
+                best_gn = cand
+                best_gn_e = best_metrics["qaoa_energy"]
+                for r_lam, b_alp in ((2.5e-4, 0.25), (2.5e-5, 0.25), (3.0e-6, 0.25), (4.0e-7, 0.25), (5.0e-8, 0.22)):
+                    c_gn = optimize_butcher_rk_stage(
+                        sim, cand, stage_selector=generation, blend_alpha=b_alp, ridge_lambda=r_lam
+                    )
+                    m_gn = sim.evaluate_qaoa_config(c_gn)
+                    if m_gn["qaoa_energy"] < best_gn_e:
+                        best_gn_e = m_gn["qaoa_energy"]
+                        best_gn = c_gn
+                cand = best_gn
             else:
                 which_rk = rng.randrange(3)
                 c1 = rng.randrange(16)
@@ -1299,16 +1335,16 @@ def run_qaoa_optimization(
                 if which_rk == 0:
                     k_idx = rng.randrange(total_steps)
                     cand["qaoa_rk_pos_mixers"][k_idx][c1][c2] = max(
-                        -1.25, min(1.25, float(cand["qaoa_rk_pos_mixers"][k_idx][c1][c2]) + delta_rk)
+                        -3.0, min(3.0, float(cand["qaoa_rk_pos_mixers"][k_idx][c1][c2]) + delta_rk)
                     )
                 elif which_rk == 1:
                     k_idx = rng.randrange(n_guided)
                     cand["qaoa_rk_cfg_mixers"][k_idx][c1][c2] = max(
-                        -1.25, min(1.25, float(cand["qaoa_rk_cfg_mixers"][k_idx][c1][c2]) + delta_rk)
+                        -3.0, min(3.0, float(cand["qaoa_rk_cfg_mixers"][k_idx][c1][c2]) + delta_rk)
                     )
                 else:
                     cand["qaoa_rk_init_mixer"][c1][c2] = max(
-                        -1.25, min(1.25, float(cand["qaoa_rk_init_mixer"][c1][c2]) + delta_rk)
+                        -3.0, min(3.0, float(cand["qaoa_rk_init_mixer"][c1][c2]) + delta_rk)
                     )
 
         else:
@@ -1368,7 +1404,7 @@ def run_qaoa_optimization(
         f"RelL2 {naive_metrics['rel_l2']:.5f} -> {best_metrics['rel_l2']:.5f} "
         f"({err_reduction:+.2f}% error reduction!)"
     )
-    print(f"  Optimized QAOA Circuit Summary (p={target_steps}, 2693 params):")
+    print(f"  Optimized QAOA Circuit Summary (p={target_steps}, 2697 params):")
     print(f"    t_nodes    (gamma_t)  : {[round(x, 6) for x in best_cfg['qaoa_t_nodes']]}")
     print(f"    tau_shifts (gamma_sh) : {[round(x, 6) for x in best_cfg['qaoa_t_eval_shifts']]}")
     print(f"    cfg_scales (beta_cfg) : {[round(x, 6) for x in best_cfg['qaoa_cfg_scales']]}")

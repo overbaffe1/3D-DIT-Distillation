@@ -370,10 +370,14 @@ class OptimizedLatDitRunner:
         uncond: bool = False,
         cached_cond_block7: Optional[torch.Tensor] = None,
         return_cond_block7: bool = False,
+        cached_mid_delta: Optional[torch.Tensor] = None,
+        mid_cache_scale: float = 1.0,
+        return_mid_delta: bool = False,
     ):
         """
         Execute 24-block FlowModel forward pass using static geometry cache,
-        fused Triton kernels, and exact 1-token unconditional condensation.
+        fused Triton kernels, exact 1-token unconditional condensation,
+        and optional QAOA-calibrated mid-block residual DeepCache.
         """
         device = xt_sorted.device
         compute_dtype = self._compute_dtype(device)
@@ -409,7 +413,22 @@ class OptimizedLatDitRunner:
         kv_cc_cache_out: Optional[List[torch.Tensor]] = [] if return_cond_block7 else None
         use_triton = self.solver_config.use_fused_triton_kernels
 
+        num_blocks = len(self.flow.blocks)
+        mid_start = int(getattr(self.solver_config, "mid_block_start", 10))
+        mid_end = int(getattr(self.solver_config, "mid_block_end", 18))
+        can_mid_cache = (not uncond) and (mid_start >= self.cond_depth) and (mid_end <= num_blocks) and (mid_start < mid_end)
+        x_mid_in: Optional[torch.Tensor] = None
+        mid_delta_out: Optional[torch.Tensor] = None
+
         for b_idx, block in enumerate(self.flow.blocks):
+            if can_mid_cache:
+                if cached_mid_delta is not None and mid_start <= b_idx < mid_end:
+                    if b_idx == mid_start:
+                        x = x + cached_mid_delta * float(mid_cache_scale)
+                    continue
+                if return_mid_delta and b_idx == mid_start:
+                    x_mid_in = x
+
             s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = block_gates[b_idx]
             fwd_idx, bwd_idx, cu_seqlens, max_len = order_caches[block.order_idx]
 
@@ -571,12 +590,19 @@ class OptimizedLatDitRunner:
             h_mlp = block.ffn1(fast_swiglu(h_gate, h1))
             x = fast_gate_add(x, h_mlp, sizes, g_mlp)
 
+            if can_mid_cache and return_mid_delta and b_idx == (mid_end - 1) and x_mid_in is not None:
+                mid_delta_out = x - x_mid_in
+
         # Output LayerNorm + Unpatchify
         x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
         out = F.linear(x, self.flow.unpatchify.weight.to(dtype=x.dtype)).float()
 
+        if return_cond_block7 and return_mid_delta:
+            return out, kv_cc_cache_out, mid_delta_out
         if return_cond_block7:
             return out, kv_cc_cache_out
+        if return_mid_delta:
+            return out, mid_delta_out
         return out
 
     @torch.no_grad()
@@ -694,7 +720,10 @@ class OptimizedLatDitRunner:
         prev_delta: Optional[torch.Tensor] = None
         last_neg: Optional[torch.Tensor] = None
         last_cond7: Optional[List[torch.Tensor]] = None
+        last_mid_delta: Optional[torch.Tensor] = None
         rk_corr: Optional[torch.Tensor] = None
+        use_mid_cache = bool(getattr(self.solver_config, "mid_block_cache_enabled", False))
+        mid_scales = getattr(self.solver_config, "qaoa_mid_cache_scales", [])
 
         if use_qaoa and len(self.solver_config.qaoa_rk_init_mixer) == self.latent_dim:
             b_init = torch.tensor(
@@ -717,10 +746,30 @@ class OptimizedLatDitRunner:
 
             eval_cond = should_eval_cond(step_idx, n_guided, cond7_stride, eval_cond_steps)
             need_cond_cache = (cond7_stride > 1) or (eval_cond_steps is not None and len(eval_cond_steps) > 0)
+            mid_sc = float(mid_scales[step_idx]) if step_idx < len(mid_scales) else 1.0
 
             if (not eval_cond) and (last_cond7 is not None):
                 v_pos = self.forward_flow_fast(
-                    xt, t_eval, context, clf_token, geom, uncond=False, cached_cond_block7=last_cond7
+                    xt,
+                    t_eval,
+                    context,
+                    clf_token,
+                    geom,
+                    uncond=False,
+                    cached_cond_block7=last_cond7,
+                    cached_mid_delta=last_mid_delta if use_mid_cache else None,
+                    mid_cache_scale=mid_sc,
+                )
+            elif need_cond_cache and use_mid_cache:
+                v_pos, last_cond7, last_mid_delta = self.forward_flow_fast(
+                    xt,
+                    t_eval,
+                    context,
+                    clf_token,
+                    geom,
+                    uncond=False,
+                    return_cond_block7=True,
+                    return_mid_delta=True,
                 )
             elif need_cond_cache:
                 v_pos, last_cond7 = self.forward_flow_fast(
@@ -760,6 +809,7 @@ class OptimizedLatDitRunner:
                             ).view(1, -1)
                             neg_est = torch.addcmul(last_neg, v_pos - prev_v_pos, fd_vec, value=1.0)
                             cur_delta = v_pos - neg_est
+                            last_neg = neg_est
                         else:
                             cur_delta = v_pos - last_neg
                     elif cfg_mode == "delta_extrapolate" and prev_delta is not None:

@@ -28,6 +28,9 @@ class SolverConfig:
     cache_cond_block7_stride: int = 2
     eval_cond_steps: List[int] = field(default_factory=lambda: [0, 2])
     eval_uncond_steps: List[int] = field(default_factory=lambda: [0, 2])
+    mid_block_cache_enabled: bool = True
+    mid_block_start: int = 9
+    mid_block_end: int = 19
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -35,6 +38,7 @@ class SolverConfig:
     qaoa_dt_scales: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 1.0])
     qaoa_cfg_scales: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 0.0])
     qaoa_momentum: List[float] = field(default_factory=lambda: [0.0, 0.04, 0.04, 0.0])
+    qaoa_mid_cache_scales: List[float] = field(default_factory=lambda: [1.0, 0.96, 1.0, 0.92])
     qaoa_step_channel_scales: List[List[float]] = field(default_factory=list)
     qaoa_step_cfg_channels: List[List[float]] = field(default_factory=list)
     qaoa_neg_fd_scales: List[List[float]] = field(default_factory=list)
