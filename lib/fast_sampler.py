@@ -40,6 +40,8 @@ class SolverConfig:
     hicache_hermite_sigma: float = 0.18
     cfg_zero_star_projection: bool = True
     foca_dead_branch_elim: bool = True
+    ditfastattn_b0_msa_share: bool = True
+    pab_cross_attn_broadcast: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

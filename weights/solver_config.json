@@ -3117,5 +3117,7 @@
   "step0_mid_cycle_scale": 2.65,
   "hicache_hermite_sigma": 0.18,
   "cfg_zero_star_projection": true,
-  "foca_dead_branch_elim": true
+  "foca_dead_branch_elim": true,
+  "ditfastattn_b0_msa_share": true,
+  "pab_cross_attn_broadcast": true
 }

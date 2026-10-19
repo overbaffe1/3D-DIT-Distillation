@@ -536,8 +536,22 @@ class OptimizedLatDitRunner:
         block_gates = tg["block_gates"]
         cond_gates = tg["cond_gates"]
 
-        # Patchify (for patch_size=1 on pre-sorted coords, this is a single linear projection)
-        x = F.linear(xt_sorted.to(dtype=compute_dtype), self.flow.patchify.weight.to(dtype=compute_dtype))
+        # DiTFastAttn (NeurIPS 2024): Exact Block-0 Patchify + 3D Self-Attention Sharing across CFG!
+        # At b_idx == 0, `cond` has not interacted with `x` yet, so `x` after Block-0 3D Self-Attention
+        # in `uncond` is BIT-FOR-BIT IDENTICAL to `pos` at the same timestep `t_val`!
+        reuse_b0_msa = (
+            uncond
+            and bool(getattr(self.solver_config, "ditfastattn_b0_msa_share", True))
+            and getattr(self, "_last_b0_t_val", None) == t_val
+            and getattr(self, "_last_b0_x_after_msa", None) is not None
+            and self._last_b0_x_after_msa.shape == (N, D)
+            and self._last_b0_x_after_msa.device == device
+        )
+        if reuse_b0_msa:
+            x = self._last_b0_x_after_msa
+        else:
+            # Patchify (for patch_size=1 on pre-sorted coords, this is a single linear projection)
+            x = F.linear(xt_sorted.to(dtype=compute_dtype), self.flow.patchify.weight.to(dtype=compute_dtype))
 
         use_1tok_uncond = uncond and self.solver_config.uncond_1token_condensation and (batch_size == 1)
         if use_1tok_uncond:
@@ -584,16 +598,22 @@ class OptimizedLatDitRunner:
             fwd_idx, bwd_idx, cu_seqlens, max_len = order_caches[block.order_idx]
 
             # --- 1. Windowed Self-Attention on 3D Voxels ---
-            h = fast_modulate(x, sizes, s_msa, sh_msa)
-            qkv = block.to_qkv(h).view(N, 3, H, HD)
-            q_scale = getattr(block.qk_norm, "_q_scale_cast", block.qk_norm.q_scale)
-            k_scale = getattr(block.qk_norm, "_k_scale_cast", block.qk_norm.k_scale)
-            qkv_sorted = fused_qknorm_rope3d_gather(
-                qkv, q_scale, k_scale, cos_vox, sin_vox, fwd_idx, use_triton=use_triton
-            )
-            attn_out = flash_varlen_qkvpacked_already_sorted(qkv_sorted, bwd_idx, cu_seqlens, max_len)
-            h = block.to_out(attn_out.reshape(N, D))
-            x = fast_gate_add(x, h, sizes, g_msa)
+            if b_idx == 0 and reuse_b0_msa:
+                x = self._last_b0_x_after_msa
+            else:
+                h = fast_modulate(x, sizes, s_msa, sh_msa)
+                qkv = block.to_qkv(h).view(N, 3, H, HD)
+                q_scale = getattr(block.qk_norm, "_q_scale_cast", block.qk_norm.q_scale)
+                k_scale = getattr(block.qk_norm, "_k_scale_cast", block.qk_norm.k_scale)
+                qkv_sorted = fused_qknorm_rope3d_gather(
+                    qkv, q_scale, k_scale, cos_vox, sin_vox, fwd_idx, use_triton=use_triton
+                )
+                attn_out = flash_varlen_qkvpacked_already_sorted(qkv_sorted, bwd_idx, cu_seqlens, max_len)
+                h = block.to_out(attn_out.reshape(N, D))
+                x = fast_gate_add(x, h, sizes, g_msa)
+                if b_idx == 0 and not uncond:
+                    self._last_b0_x_after_msa = x
+                    self._last_b0_t_val = t_val
 
             # --- 2. Conditioning Self-Attention + Cross-Attention ---
             if block.cond:
@@ -646,18 +666,33 @@ class OptimizedLatDitRunner:
                         cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
 
                 elif cached_cond_block7 is not None:
-                    # Reuse cached K,V of conditioning from previous step; only compute Q_x and x->cond cross-attn!
-                    h_x = fast_modulate(x, sizes, s_cr, sh_cr)
-                    q_w = getattr(block, "_to_q_cross_w", None)
-                    if q_w is not None:
-                        q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                    # PAB (Pyramid Attention Broadcast, ICLR 2025): on fast FBCache steps, broadcast
+                    # cached Block-0 cross-attention output projection directly with current step's gate `g_cr`!
+                    if (
+                        b_idx == 0
+                        and skip_cond_out
+                        and bool(getattr(self.solver_config, "pab_cross_attn_broadcast", True))
+                        and getattr(self, "_last_b0_cr_proj", None) is not None
+                        and self._last_b0_cr_proj.shape == (N, D)
+                        and self._last_b0_cr_proj.device == device
+                    ):
+                        x = fast_gate_add(x, self._last_b0_cr_proj, sizes, g_cr)
                     else:
-                        q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
-                    kv_cc = cached_cond_block7[b_idx]
-                    h_x_out = flash_cross_attn(
-                        q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
-                    )
-                    x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                        # Reuse cached K,V of conditioning from previous step; only compute Q_x and x->cond cross-attn!
+                        h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                        q_w = getattr(block, "_to_q_cross_w", None)
+                        if q_w is not None:
+                            q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                        else:
+                            q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
+                        kv_cc = cached_cond_block7[b_idx]
+                        h_x_out = flash_cross_attn(
+                            q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
+                        )
+                        cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
+                        if b_idx == 0 and not uncond:
+                            self._last_b0_cr_proj = cr_proj_out
+                        x = fast_gate_add(x, cr_proj_out, sizes, g_cr)
                 else:
                     L = cond.shape[1]
                     h_cond = fast_modulate_cond(cond, cs_msa, csh_msa)
@@ -692,7 +727,10 @@ class OptimizedLatDitRunner:
                             kv_seqlens_full,
                             kv_maxlen_full,
                         )
-                        x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                        cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
+                        if b_idx == 0 and not uncond:
+                            self._last_b0_cr_proj = cr_proj_out
+                        x = fast_gate_add(x, cr_proj_out, sizes, g_cr)
                     else:
                         qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
                         h_x_out = flash_cross_attn(
@@ -703,7 +741,10 @@ class OptimizedLatDitRunner:
                             kv_seqlens_full,
                             kv_maxlen_full,
                         )
-                        x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                        cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
+                        if b_idx == 0 and not uncond:
+                            self._last_b0_cr_proj = cr_proj_out
+                        x = fast_gate_add(x, cr_proj_out, sizes, g_cr)
 
                         h_c_out = flash_cross_attn(
                             qkv_cc_cr[:, 0],
