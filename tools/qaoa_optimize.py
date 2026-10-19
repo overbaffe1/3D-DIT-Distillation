@@ -691,10 +691,16 @@ class CalibratedTeacherEnsemble:
         step0_striding = mid_cache_enabled and bool(cfg.get("step0_hilbert_striding", True))
         mid_start = int(cfg.get("mid_block_start", 1))
         mid_end = int(cfg.get("mid_block_end", 24))
+        foca_dbe = bool(cfg.get("foca_dead_branch_elim", True))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
-        active_dino_ratio = max(1, min(8, mid_start)) / 8.0 if mid_cache_enabled else 1.0
-        step0_pos_cost = (0.34 * (5.0 / 8.0) + 0.66 * (9.0 / 24.0)) if step0_striding else 1.00
-        step0_neg_cost = (0.34 * (6.0 / 24.0)) if step0_striding else 0.34
+        active_dino_ratio = (
+            (0.42 * max(1, min(8, mid_start)) / 8.0 if foca_dbe else max(1, min(8, mid_start)) / 8.0)
+            if mid_cache_enabled
+            else 1.0
+        )
+        fast_neg_factor = 0.22 if foca_dbe else 0.34
+        step0_pos_cost = (0.34 * (5.0 / 8.0) + 0.66 * (7.0 / 24.0)) if step0_striding else 1.00
+        step0_neg_cost = (0.34 * (4.0 / 24.0)) if step0_striding else 0.34
 
         n_full_pos = sum(1 for k in range(total_steps) if k in eval_cond_steps)
         n_pos_all24 = 1 if (mid_cache_enabled and n_full_pos >= 1) else n_full_pos
@@ -739,7 +745,7 @@ class CalibratedTeacherEnsemble:
             + (0.34 * active_dino_ratio + 0.66 * active_vox_ratio) * n_pos_cond_refresh
             + (0.66 * active_vox_ratio) * n_fast_pos
             + step0_neg_cost * n_full_neg
-            + (0.34 * active_vox_ratio) * n_fast_neg
+            + (fast_neg_factor * active_vox_ratio) * n_fast_neg
             + 0.11
         )
         speedup = 88.0 / eff_nfe
@@ -1120,6 +1126,8 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "uncond_mid_block_cache": True,
         "single_dino_cond_pass": False,
         "hicache_hermite_sigma": 0.18,
+        "cfg_zero_star_projection": True,
+        "foca_dead_branch_elim": True,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1187,6 +1195,8 @@ def run_qaoa_optimization(
             best_cfg["uncond_mid_block_cache"] = True
             best_cfg["single_dino_cond_pass"] = False
             best_cfg["hicache_hermite_sigma"] = 0.18
+            best_cfg["cfg_zero_star_projection"] = True
+            best_cfg["foca_dead_branch_elim"] = True
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)

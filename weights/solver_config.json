@@ -3115,5 +3115,7 @@
   "step0_hilbert_striding": true,
   "step0_cond_cycle_scale": 0.85,
   "step0_mid_cycle_scale": 2.65,
-  "hicache_hermite_sigma": 0.18
+  "hicache_hermite_sigma": 0.18,
+  "cfg_zero_star_projection": true,
+  "foca_dead_branch_elim": true
 }

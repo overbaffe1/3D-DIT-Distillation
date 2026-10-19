@@ -598,6 +598,15 @@ class OptimizedLatDitRunner:
             # --- 2. Conditioning Self-Attention + Cross-Attention ---
             if block.cond:
                 cs_msa, csh_msa, cg_msa, cs_cr, csh_cr, cg_cr, cs_mlp, csh_mlp, cg_mlp = cond_gates[b_idx]
+                # Exact Dead-Branch Elimination (FoCa / FBCache): when the next block (b_idx + 1 == mid_start)
+                # applies the full tail residual up to block 23 and breaks, updated `cond` after x->cond is never read!
+                skip_cond_out = (
+                    can_mid_cache
+                    and (cached_mid_delta is not None)
+                    and (mid_end == num_blocks)
+                    and (b_idx == mid_start - 1)
+                    and (not return_cond_delta)
+                )
 
                 if use_1tok_uncond:
                     # Exact 1-token unconditional self-attention: only V projection needed!
@@ -611,29 +620,30 @@ class OptimizedLatDitRunner:
 
                     # Exact 1-token cross-attention:
                     # x -> cond output is identically v_cond_cross for all N voxels!
-                    # cond -> x only needs K, V of x and 1 query q_cond_cross!
-                    h_x = fast_modulate(x, sizes, s_cr, sh_cr)
-                    kv_w = getattr(block, "_to_kv_cross_w", None)
-                    if kv_w is not None:
-                        kv_x = F.linear(h_x, kv_w, getattr(block, "_to_kv_cross_b", None)).view(N, 2, H, HD)
-                    else:
-                        kv_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 1:]
-
                     h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
                     q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
 
                     h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
                     x = fast_gate_add(x, h_x_cross, sizes, g_cr)
 
-                    h_c_cross = flash_cross_attn(
-                        q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seqlens, q_maxlen
-                    )
-                    cond = cond + block.cond_to_out_cross(h_c_cross.view(1, 1, D)) * cg_cr[:, None]
+                    if not skip_cond_out:
+                        # cond -> x only needed if subsequent blocks read `cond`
+                        h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                        kv_w = getattr(block, "_to_kv_cross_w", None)
+                        if kv_w is not None:
+                            kv_x = F.linear(h_x, kv_w, getattr(block, "_to_kv_cross_b", None)).view(N, 2, H, HD)
+                        else:
+                            kv_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 1:]
 
-                    # 1-token cond FFN
-                    h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
-                    hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
-                    cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
+                        h_c_cross = flash_cross_attn(
+                            q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seqlens, q_maxlen
+                        )
+                        cond = cond + block.cond_to_out_cross(h_c_cross.view(1, 1, D)) * cg_cr[:, None]
+
+                        # 1-token cond FFN
+                        h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
+                        hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
+                        cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
 
                 elif cached_cond_block7 is not None:
                     # Reuse cached K,V of conditioning from previous step; only compute Q_x and x->cond cross-attn!
@@ -661,37 +671,53 @@ class OptimizedLatDitRunner:
                     cond = cond + block.cond_to_out(h_cond.reshape(batch_size, L, D)) * cg_msa[:, None]
 
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
-                    qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
-
                     h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
                     qkv_cc_cr = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)
                     kv_cc = qkv_cc_cr[:, 1:]
                     if kv_cc_cache_out is not None:
                         kv_cc_cache_out.append(kv_cc)
 
-                    h_x_out = flash_cross_attn(
-                        qkv_x_cr[:, 0],
-                        q_seqlens,
-                        q_maxlen,
-                        kv_cc,
-                        kv_seqlens_full,
-                        kv_maxlen_full,
-                    )
-                    x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                    if skip_cond_out:
+                        # Only Q_x is needed when updated `cond` is not read by subsequent blocks!
+                        q_w = getattr(block, "_to_q_cross_w", None)
+                        if q_w is not None:
+                            q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                        else:
+                            q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
+                        h_x_out = flash_cross_attn(
+                            q_x,
+                            q_seqlens,
+                            q_maxlen,
+                            kv_cc,
+                            kv_seqlens_full,
+                            kv_maxlen_full,
+                        )
+                        x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                    else:
+                        qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
+                        h_x_out = flash_cross_attn(
+                            qkv_x_cr[:, 0],
+                            q_seqlens,
+                            q_maxlen,
+                            kv_cc,
+                            kv_seqlens_full,
+                            kv_maxlen_full,
+                        )
+                        x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
 
-                    h_c_out = flash_cross_attn(
-                        qkv_cc_cr[:, 0],
-                        kv_seqlens_full,
-                        kv_maxlen_full,
-                        qkv_x_cr[:, 1:],
-                        q_seqlens,
-                        q_maxlen,
-                    )
-                    cond = cond + block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D)) * cg_cr[:, None]
+                        h_c_out = flash_cross_attn(
+                            qkv_cc_cr[:, 0],
+                            kv_seqlens_full,
+                            kv_maxlen_full,
+                            qkv_x_cr[:, 1:],
+                            q_seqlens,
+                            q_maxlen,
+                        )
+                        cond = cond + block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D)) * cg_cr[:, None]
 
-                    h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
-                    hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
-                    cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
+                        h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
+                        hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
+                        cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
 
                 if b_idx == self.cond_depth - 1 and cached_cond_block7 is None:
                     if return_cond_delta and cond_mid_in is not None:
@@ -1015,6 +1041,12 @@ class OptimizedLatDitRunner:
                             neg_est = torch.addcmul(last_neg, v_pos - prev_v_pos, fd_vec, value=1.0)
                             cur_delta = v_pos - neg_est
                             last_neg = neg_est
+                        elif bool(getattr(self.solver_config, "cfg_zero_star_projection", True)):
+                            # CFG-Zero* (arXiv:2503.18886): optimal scalar projection s* = <v_pos, v_neg> / ||v_neg||^2
+                            dot_pn = (v_pos * last_neg).sum()
+                            norm_nn = (last_neg * last_neg).sum().clamp_min(1e-6)
+                            s_star = (dot_pn / norm_nn).clamp(0.90, 1.10)
+                            cur_delta = v_pos - s_star * last_neg
                         else:
                             cur_delta = v_pos - last_neg
                     elif cfg_mode == "delta_extrapolate" and prev_delta is not None:
