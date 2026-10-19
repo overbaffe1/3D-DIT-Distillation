@@ -14,7 +14,7 @@ weights_dir: None
 errors: []
 notes: ['missing non-empty weights/; eval will use organizer lat_dit weights']
 
-Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (54.8 KB)
+Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (55.4 KB)
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=['missing non-empty weights/; eval will use organizer lat_dit weights']
