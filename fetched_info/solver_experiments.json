@@ -1,16 +1,16 @@
 {
   "equivalence": {
-    "pos_max_abs_diff": 1.0728836059570312e-06,
+    "pos_max_abs_diff": 9.5367431640625e-07,
     "pos_cosine_sim": 1.0000003576278687,
-    "neg_1token_max_abs_diff": 5.4836273193359375e-06,
+    "neg_1token_max_abs_diff": 2.682209014892578e-06,
     "neg_1token_cosine_sim": 0.9999997615814209,
-    "ref_pos_sec": 1.6268393590000017,
-    "fast_pos_sec": 1.6195300790000147,
-    "ref_neg_sec": 1.6586193649999927,
-    "fast_neg_1token_sec": 0.20963635799998315,
-    "neg_speedup": 7.911887903529244
+    "ref_pos_sec": 2.820714888999987,
+    "fast_pos_sec": 2.8214258950000044,
+    "ref_neg_sec": 2.8898118959999977,
+    "fast_neg_1token_sec": 0.27207884900002455,
+    "neg_speedup": 10.62122949512969
   },
-  "teacher_time_sec": 5.4093379090000155,
+  "teacher_time_sec": 6.691307380000012,
   "solvers": {
     "euler_20_naive": {
       "steps": 20,
@@ -18,76 +18,76 @@
       "cfg_stride": 1,
       "cfg_cache_mode": "exact",
       "rel_l2": 0.7074968218803406,
-      "cosine_sim": 0.7255234718322754,
-      "mae": 3.1561903953552246,
-      "time_sec": 2.14222983800002,
-      "speedup_vs_teacher": 2.5250968934547933
+      "cosine_sim": 0.7255233526229858,
+      "mae": 3.156189441680908,
+      "time_sec": 2.6709403769999938,
+      "speedup_vs_teacher": 2.5052252897968854
     },
     "piecewise_euler_20_exact": {
       "steps": 20,
       "solver_type": "piecewise_euler",
       "cfg_stride": 1,
       "cfg_cache_mode": "exact",
-      "rel_l2": 0.6870876550674438,
-      "cosine_sim": 0.7293001413345337,
-      "mae": 3.041072130203247,
-      "time_sec": 1.9646389760000034,
-      "speedup_vs_teacher": 2.753349584875591
+      "rel_l2": 0.6870877146720886,
+      "cosine_sim": 0.7293000221252441,
+      "mae": 3.041071891784668,
+      "time_sec": 2.591021409999996,
+      "speedup_vs_teacher": 2.5824979115089683
     },
     "piecewise_ab2_20_exact": {
       "steps": 20,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 1,
       "cfg_cache_mode": "exact",
-      "rel_l2": 0.6870876550674438,
-      "cosine_sim": 0.7293001413345337,
-      "mae": 3.041072130203247,
-      "time_sec": 2.022996906000003,
-      "speedup_vs_teacher": 2.673922976825357
+      "rel_l2": 0.6870877146720886,
+      "cosine_sim": 0.7293000221252441,
+      "mae": 3.041071891784668,
+      "time_sec": 2.5724056109999935,
+      "speedup_vs_teacher": 2.601186745739853
     },
     "piecewise_ab2_16_stride2_reuse": {
       "steps": 16,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_reuse",
-      "rel_l2": 0.4417162835597992,
-      "cosine_sim": 0.9179185628890991,
-      "mae": 1.9349737167358398,
-      "time_sec": 1.7997965699999838,
-      "speedup_vs_teacher": 3.005527401910797
+      "rel_l2": 0.44171658158302307,
+      "cosine_sim": 0.9179184436798096,
+      "mae": 1.9349745512008667,
+      "time_sec": 2.3895642909999992,
+      "speedup_vs_teacher": 2.8002206951292337
     },
     "piecewise_ab2_16_stride2_extrap": {
       "steps": 16,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.5011200904846191,
+      "rel_l2": 0.5011201500892639,
       "cosine_sim": 0.8661159873008728,
-      "mae": 2.239769697189331,
-      "time_sec": 1.6563226030000067,
-      "speedup_vs_teacher": 3.2658721792496084
+      "mae": 2.239771604537964,
+      "time_sec": 2.1067286100000047,
+      "speedup_vs_teacher": 3.17616011300098
     },
     "piecewise_ab2_14_stride2_extrap": {
       "steps": 14,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.8951542973518372,
+      "rel_l2": 0.8951545357704163,
       "cosine_sim": 0.5325607657432556,
-      "mae": 4.040725231170654,
-      "time_sec": 1.6651321500000051,
-      "speedup_vs_teacher": 3.248593758159074
+      "mae": 4.040728569030762,
+      "time_sec": 1.9409893929999953,
+      "speedup_vs_teacher": 3.447369369524436
     },
     "piecewise_ab2_12_stride2_extrap": {
       "steps": 12,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.9129226803779602,
-      "cosine_sim": 0.45943406224250793,
-      "mae": 4.2681684494018555,
-      "time_sec": 1.5517879269999924,
-      "speedup_vs_teacher": 3.4858744644686506
+      "rel_l2": 0.9129230976104736,
+      "cosine_sim": 0.45943379402160645,
+      "mae": 4.268171310424805,
+      "time_sec": 1.8027778660000138,
+      "speedup_vs_teacher": 3.711664928994619
     }
   }
 }
