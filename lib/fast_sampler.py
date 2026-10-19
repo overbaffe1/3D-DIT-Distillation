@@ -29,6 +29,9 @@ class SolverConfig:
     eval_cond_steps: List[int] = field(default_factory=lambda: [0, 2])
     eval_uncond_steps: List[int] = field(default_factory=lambda: [0, 2])
     mid_block_cache_enabled: bool = True
+    step0_hilbert_striding: bool = True
+    step0_cond_cycle_scale: float = 0.85
+    step0_mid_cycle_scale: float = 2.65
     deep_block_start: int = 1
     mid_block_start: int = 1
     mid_block_end: int = 23

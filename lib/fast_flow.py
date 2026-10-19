@@ -545,8 +545,20 @@ class OptimizedLatDitRunner:
         mid_start = int(getattr(self.solver_config, "mid_block_start", 1))
         mid_end = min(int(getattr(self.solver_config, "mid_block_end", 23)), num_blocks - 1)
         can_mid_cache = (0 < mid_start < mid_end)
+        use_step0_striding = (
+            can_mid_cache
+            and (cached_mid_delta is None)
+            and return_mid_delta
+            and (num_blocks == 24)
+            and bool(getattr(self.solver_config, "step0_hilbert_striding", True))
+        )
+        s0_cond_scale = float(getattr(self.solver_config, "step0_cond_cycle_scale", 0.85))
+        s0_mid_scale = float(getattr(self.solver_config, "step0_mid_cycle_scale", 2.65))
         x_mid_in: Optional[torch.Tensor] = None
         cond_mid_in: Optional[torch.Tensor] = None
+        x_s0_c2_in: Optional[torch.Tensor] = None
+        cond_s0_c2_in: Optional[torch.Tensor] = None
+        x_s0_m8_in: Optional[torch.Tensor] = None
         mid_delta_out: Optional[torch.Tensor] = None
         cond_delta_out: Optional[torch.Tensor] = None
 
@@ -565,6 +577,44 @@ class OptimizedLatDitRunner:
                         x_mid_in = x
                     if return_cond_delta:
                         cond_mid_in = cond
+
+            if use_step0_striding:
+                if uncond:
+                    # 1-token uncond on Step 0: execute 6 anchor blocks (0, 1, 7, 8, 22, 23)
+                    if b_idx == 1:
+                        x_s0_c2_in = x
+                        cond_s0_c2_in = cond
+                    elif 2 <= b_idx <= 6:
+                        if b_idx == 2 and x_s0_c2_in is not None and cond_s0_c2_in is not None:
+                            x = x + (x - x_s0_c2_in) * s0_cond_scale
+                            cond = cond + (cond - cond_s0_c2_in) * s0_cond_scale
+                        continue
+                    elif b_idx == 8:
+                        x_s0_m8_in = x
+                    elif 9 <= b_idx <= 21:
+                        if b_idx == 9 and x_s0_m8_in is not None:
+                            x = x + (x - x_s0_m8_in) * s0_mid_scale
+                        continue
+                else:
+                    # Pos on Step 0: execute 9 anchor blocks (0, 1, 2, 3, 7, 8, 9, 22, 23)
+                    if b_idx == 2:
+                        x_s0_c2_in = x
+                        cond_s0_c2_in = cond
+                    elif 4 <= b_idx <= 6:
+                        if b_idx == 4 and x_s0_c2_in is not None and cond_s0_c2_in is not None:
+                            x = x + (x - x_s0_c2_in) * s0_cond_scale
+                            cond = cond + (cond - cond_s0_c2_in) * s0_cond_scale
+                        if kv_cc_cache_out is not None:
+                            kv_cc_cache_out.append(None)
+                        continue
+                    elif b_idx == 8:
+                        x_s0_m8_in = x
+                    elif 10 <= b_idx <= 21:
+                        if b_idx == 10 and x_s0_m8_in is not None:
+                            x = x + (x - x_s0_m8_in) * s0_mid_scale
+                        if kv_cc_cache_out is not None:
+                            kv_cc_cache_out.append(None)
+                        continue
 
             s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = block_gates[b_idx]
             fwd_idx, bwd_idx, cu_seqlens, max_len = order_caches[block.order_idx]

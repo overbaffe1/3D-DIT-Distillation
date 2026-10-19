@@ -3111,5 +3111,8 @@
   "uncond_mid_block_cache": true,
   "qaoa_uncond_mid_scale": 0.955,
   "single_dino_cond_pass": false,
-  "deep_block_start": 1
+  "deep_block_start": 1,
+  "step0_hilbert_striding": true,
+  "step0_cond_cycle_scale": 0.85,
+  "step0_mid_cycle_scale": 2.65
 }

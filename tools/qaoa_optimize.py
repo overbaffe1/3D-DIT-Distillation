@@ -688,10 +688,13 @@ class CalibratedTeacherEnsemble:
         eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
         mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
         uncond_mid_cache = mid_cache_enabled and bool(cfg.get("uncond_mid_block_cache", True))
+        step0_striding = mid_cache_enabled and bool(cfg.get("step0_hilbert_striding", True))
         mid_start = int(cfg.get("mid_block_start", 1))
         mid_end = int(cfg.get("mid_block_end", 23))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         active_dino_ratio = max(1, min(8, mid_start)) / 8.0 if mid_cache_enabled else 1.0
+        step0_pos_cost = (0.34 * (5.0 / 8.0) + 0.66 * (9.0 / 24.0)) if step0_striding else 1.00
+        step0_neg_cost = (0.34 * (6.0 / 24.0)) if step0_striding else 0.34
 
         n_full_pos = sum(1 for k in range(total_steps) if k in eval_cond_steps)
         n_pos_all24 = 1 if (mid_cache_enabled and n_full_pos >= 1) else n_full_pos
@@ -732,12 +735,12 @@ class CalibratedTeacherEnsemble:
         rmse = total_rmse / S
 
         eff_nfe = (
-            1.00 * n_pos_all24
+            step0_pos_cost * n_pos_all24
             + (0.34 * active_dino_ratio + 0.66 * active_vox_ratio) * n_pos_cond_refresh
             + (0.66 * active_vox_ratio) * n_fast_pos
-            + 0.34 * n_full_neg
+            + step0_neg_cost * n_full_neg
             + (0.34 * active_vox_ratio) * n_fast_neg
-            + 0.14
+            + 0.11
         )
         speedup = 88.0 / eff_nfe
         est_lpips = 0.145 * (rel_l2 ** 1.75)
@@ -1108,6 +1111,9 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "eval_cond_steps": eval_cond,
         "eval_uncond_steps": eval_uncond,
         "mid_block_cache_enabled": True,
+        "step0_hilbert_striding": True,
+        "step0_cond_cycle_scale": 0.85,
+        "step0_mid_cycle_scale": 2.65,
         "deep_block_start": 1,
         "mid_block_start": 1,
         "mid_block_end": 23,
@@ -1173,6 +1179,7 @@ def run_qaoa_optimization(
         if target_steps == 4:
             best_cfg["eval_uncond_steps"] = [0, 2]
             best_cfg["mid_block_cache_enabled"] = True
+            best_cfg["step0_hilbert_striding"] = True
             best_cfg["deep_block_start"] = 1
             best_cfg["mid_block_start"] = 1
             best_cfg["mid_block_end"] = 23
