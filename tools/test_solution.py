@@ -160,6 +160,9 @@ def test_pytorch_pipeline() -> None:
             assert hasattr(sol_model.runner.flow.blocks[0], "_cond_1tok_msa_w")
             assert hasattr(sol_model.runner.flow.blocks[0], "_cond_1tok_q_and_out_cr_w")
             assert hasattr(sol_model.runner.flow.blocks[-1], "_cond_1tok_cr_w")
+            from lib.fast_sampler import compute_stork2_beta
+            beta9 = compute_stork2_beta(9)
+            assert abs(beta9 - 0.46283549) < 1e-6, f"Unexpected STORK-2 beta_9: {beta9}"
 
             # Test full generate() call and metadata recording
             g = torch.Generator(device=device).manual_seed(123)
@@ -172,6 +175,8 @@ def test_pytorch_pipeline() -> None:
             assert isinstance(out_latents, list) and len(out_latents) == 1
             assert out_latents[0].shape == (len(vox_t), 16)
             assert torch.isfinite(out_latents[0]).all()
+            assert getattr(sol_model.runner, "_last_pos_x_without_cr", None) is not None
+            assert getattr(sol_model.runner, "_last_pos_kv_x_list", None) is not None
             meta = sol_model.last_run_metadata
             assert meta is not None and "elapsed_seconds" in meta and meta.get("status") == "ok"
             print(f"   generate() output shape={tuple(out_latents[0].shape)}, metadata={meta}")

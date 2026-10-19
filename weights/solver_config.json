@@ -3145,5 +3145,9 @@
   "symplectic_verlet_kick": true,
   "hamiltonian_hap_omega": 0.016,
   "l1_table_rope3d": true,
-  "fused_msa_to_cr_modulate": true
+  "fused_msa_to_cr_modulate": true,
+  "uncond_carrier_share": true,
+  "stork2_stabilized_rk": true,
+  "stork2_stages": 9,
+  "interblock_gate_modulate_fusion": true
 }

@@ -711,6 +711,14 @@ class CalibratedTeacherEnsemble:
                             v_step[m][c] += float(acc_ch_row[c]) * (
                                 v[m][c] - 2.0 * prev_v[m][c] + prev2_v[m][c]
                             )
+                use_stork2 = bool(cfg.get("stork2_stabilized_rk", True))
+                stork2_stages = int(cfg.get("stork2_stages", 9))
+                if use_stork2 and stork2_stages >= 2:
+                    stork_beta = 0.46283549 if stork2_stages == 9 else 0.41742252
+                    stork_coeff = 0.06 * stork_beta * 0.35
+                    for m in range(self.num_modes):
+                        for c in range(self.latent_dim):
+                            v_step[m][c] += stork_coeff * (v[m][c] - prev_v[m][c])
                 cd_omega = float(cfg.get("counterdiabatic_berry_omega", 0.025))
                 magnus_gamma = float(cfg.get("magnus_commutator_gamma", 0.015))
                 if cd_omega > 0.0 or magnus_gamma > 0.0:
@@ -800,6 +808,8 @@ class CalibratedTeacherEnsemble:
         fused_out_unp = bool(cfg.get("fused_out_unpatchify", True))
         l1_rope3d = bool(cfg.get("l1_table_rope3d", True))
         fused_msa_cr = bool(cfg.get("fused_msa_to_cr_modulate", True))
+        carrier_share = bool(cfg.get("uncond_carrier_share", True))
+        interblock_fuse = bool(cfg.get("interblock_gate_modulate_fusion", True))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         dino_b0_factor = 0.0 if pab_step2 else (0.10 if (foca_dbe and hetcache_b0) else (0.42 if foca_dbe else 1.0))
         active_dino_ratio = (
@@ -827,27 +837,39 @@ class CalibratedTeacherEnsemble:
         )
         fast_neg_factor = 0.015 if (freqca_crf and b0_msa_share and hetcache_b0) else (0.04 if (freqca_crf and b0_msa_share) else 0.34)
         step0_cond_blocks = (
-            3.95
-            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr)
+            3.85
+            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse)
             else (
-                4.10
-                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
-                else (4.45 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
+                3.95
+                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr)
+                else (
+                    4.10
+                    if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
+                    else (4.45 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
+                )
             )
         )
         step0_vox_blocks = (
-            6.50
-            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr)
-            else (6.80 if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp) else 7.0)
+            6.25
+            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse)
+            else (
+                6.50
+                if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr)
+                else (6.80 if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp) else 7.0)
+            )
         )
         step0_pos_cost = (0.34 * (step0_cond_blocks / 8.0) + 0.66 * (step0_vox_blocks / 24.0)) if step0_striding else 1.00
         step0_neg_blocks = (
-            2.20
-            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d)
+            0.50
+            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share)
             else (
-                2.35
-                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
-                else (2.75 if (step0_striding and b0_msa_share and qmc_stride >= 4) else 3.5)
+                2.20
+                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d)
+                else (
+                    2.35
+                    if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
+                    else (2.75 if (step0_striding and b0_msa_share and qmc_stride >= 4) else 3.5)
+                )
             )
         )
         step0_neg_cost = (0.34 * (step0_neg_blocks / 24.0)) if step0_striding else 0.34
@@ -1326,6 +1348,10 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "hamiltonian_hap_omega": 0.016,
         "l1_table_rope3d": True,
         "fused_msa_to_cr_modulate": True,
+        "uncond_carrier_share": True,
+        "stork2_stabilized_rk": True,
+        "stork2_stages": 9,
+        "interblock_gate_modulate_fusion": True,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1423,6 +1449,10 @@ def run_qaoa_optimization(
             best_cfg["hamiltonian_hap_omega"] = 0.016
             best_cfg["l1_table_rope3d"] = True
             best_cfg["fused_msa_to_cr_modulate"] = True
+            best_cfg["uncond_carrier_share"] = True
+            best_cfg["stork2_stabilized_rk"] = True
+            best_cfg["stork2_stages"] = 9
+            best_cfg["interblock_gate_modulate_fusion"] = True
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)
@@ -1433,11 +1463,11 @@ def run_qaoa_optimization(
         sigma = 0.025
 
     print("=" * 78)
-    print(f"  QAOA 2697-Parameter Deep Kerr-Butcher-QAOA Optimizer — Generation #{generation}")
+    print(f"  QAOA 2700-Parameter Deep Kerr-Butcher-QAOA Optimizer — Generation #{generation}")
     print("=" * 78)
     print(
         f"  Target Circuit Depth (p): {target_steps} steps "
-        f"({best_cfg['n_guided_steps']} guided + {best_cfg['n_unguided_steps']} unguided, 2697 variational params)"
+        f"({best_cfg['n_guided_steps']} guided + {best_cfg['n_unguided_steps']} unguided, 2700 variational params)"
     )
     print(
         f"  Unoptimized Standard Baseline (p={target_steps}): "

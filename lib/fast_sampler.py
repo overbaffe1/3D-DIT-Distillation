@@ -68,6 +68,10 @@ class SolverConfig:
     hamiltonian_hap_omega: float = 0.016
     l1_table_rope3d: bool = True
     fused_msa_to_cr_modulate: bool = True
+    uncond_carrier_share: bool = True
+    stork2_stabilized_rk: bool = True
+    stork2_stages: int = 9
+    interblock_gate_modulate_fusion: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -140,6 +144,47 @@ class SolverConfig:
         return cfg
 
 
+def is_rk_spectral_safe(solver_cfg: SolverConfig) -> bool:
+    """Return True iff the 128x128 Butcher readout matrices are non-empty and within physical spectral bounds."""
+    if not solver_cfg.qaoa_rk_pos_mixers and not solver_cfg.qaoa_rk_cfg_mixers:
+        return False
+    max_rk_abs = 0.0
+    for mat in solver_cfg.qaoa_rk_pos_mixers + solver_cfg.qaoa_rk_cfg_mixers:
+        for row in mat:
+            for val in row:
+                if abs(float(val)) > max_rk_abs:
+                    max_rk_abs = abs(float(val))
+    return 0.0 < max_rk_abs <= 0.15
+
+
+def compute_stork2_beta(stages: int = 9) -> float:
+    """
+    Closed-form 2nd-order Taylor/Gegenbauer coefficient beta_S for s-stage STORK-2
+    (Stabilized Orthogonal Runge-Kutta for Flow Matching, arXiv:2505.24210).
+    """
+    s_max = max(2, int(stages))
+
+    def _b_coeff(j: int) -> float:
+        if j == 0:
+            return 1.0
+        if j == 1:
+            return 1.0 / 3.0
+        return (4.0 * (j - 1) * (j + 4)) / (3.0 * j * (j + 1) * (j + 2) * (j + 3))
+
+    omega = 6.0 / ((s_max + 4) * (s_max - 1))
+    denom = s_max * s_max + s_max - 2
+    b_prev2, b_prev = 0.0, 0.0
+    for s in range(2, s_max + 1):
+        cb, pb, ppb = _b_coeff(s), _b_coeff(s - 1), _b_coeff(s - 2)
+        mu = (2 * s + 1) * cb / (s * pb)
+        nu = -(s + 1) * cb / (s * ppb)
+        mu_t = mu * omega
+        cf = (4.0 / (3.0 * denom)) if s == 2 else ((s - 1) ** 2 + (s - 1) - 2) / denom
+        b_cur = mu * b_prev + nu * b_prev2 + mu_t * cf
+        b_prev2, b_prev = b_prev, b_cur
+    return float(b_prev)
+
+
 def build_schedule(
     solver_cfg: SolverConfig,
     num_steps_override: Optional[int] = None,
@@ -167,6 +212,7 @@ def build_schedule(
     t_low = float(cfg_range[0])
     if (
         solver_cfg.qaoa_enabled
+        and is_rk_spectral_safe(solver_cfg)
         and num_steps_override is None
         and len(solver_cfg.qaoa_t_nodes) == total_steps + 1
     ):
@@ -207,11 +253,13 @@ def build_schedule(
 def get_qaoa_eval_timesteps(solver_cfg: SolverConfig, t_list: List[float]) -> List[float]:
     """
     Compute the effective evaluation timestamps tau_k in [t_{k+1}, t_k] for each step k
-    using variational QAOA phase shifts `qaoa_t_eval_shifts`.
+    using variational QAOA phase shifts `qaoa_t_eval_shifts` (when RK readout is active).
     """
     total_steps = len(t_list) - 1
+    if not (solver_cfg.qaoa_enabled and is_rk_spectral_safe(solver_cfg)):
+        return [float(t_list[k]) for k in range(total_steps)]
     eval_ts: List[float] = []
-    shifts = solver_cfg.qaoa_t_eval_shifts if solver_cfg.qaoa_enabled else []
+    shifts = solver_cfg.qaoa_t_eval_shifts
     for k in range(total_steps):
         t_cur = float(t_list[k])
         t_nxt = float(t_list[k + 1])
