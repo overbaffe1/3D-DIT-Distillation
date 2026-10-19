@@ -64,6 +64,10 @@ class SolverConfig:
     chebyshev_pade_resolvent: bool = True
     pade_resolvent_eta: float = 0.018
     fused_out_unpatchify: bool = True
+    symplectic_verlet_kick: bool = True
+    hamiltonian_hap_omega: float = 0.016
+    l1_table_rope3d: bool = True
+    fused_msa_to_cr_modulate: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

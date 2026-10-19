@@ -541,9 +541,17 @@ class OptimizedLatDitRunner:
             layout = [slice((offset[i] - seq_len[i]).item(), offset[i].item()) for i in range(batch_size)]
             sizes = [lay.stop - lay.start for lay in layout]
 
-        # Precompute 3D RoPE cos/sin for all voxels once
+        # Precompute 3D RoPE cos/sin for all voxels once (or keep 4KB L1 table for direct Triton lookup!)
         cos_table_3d, sin_table_3d = self._get_rope_3d_table(device)
-        cos_vox, sin_vox = lookup_rope_3d(h_coords[:, 1:], cos_table_3d, sin_table_3d)
+        use_l1_table = (
+            self.solver_config.use_fused_triton_kernels
+            and bool(getattr(self.solver_config, "l1_table_rope3d", True))
+            and device.type == "cuda"
+        )
+        if use_l1_table:
+            cos_vox, sin_vox = cos_table_3d, sin_table_3d
+        else:
+            cos_vox, sin_vox = lookup_rope_3d(h_coords[:, 1:], cos_table_3d, sin_table_3d)
 
         # Precompute 2D RoPE cos/sin for image cond tokens
         cond_tokens = context.shape[1]
@@ -562,7 +570,9 @@ class OptimizedLatDitRunner:
         )
 
         # Precompute 3D submanifold sparse conv neighbor indices once (replaces 2,112 calls!)
-        conv_indices = build_conv_indices_fast(h_coords)
+        conv_indices = build_conv_indices_fast(
+            h_coords, already_sorted=(batch_size == 1 and self.res <= 1024)
+        )
 
         # Cross-attention sequence lengths
         q_seq_key = (device, "q_seq", tuple(sizes))
@@ -643,6 +653,7 @@ class OptimizedLatDitRunner:
         D, H, HD = self.dim, self.num_heads, self.head_dim
 
         cos_vox, sin_vox = geom["cos_vox"], geom["sin_vox"]
+        h_coords = geom["h_coords"]
         cos_cond_2d, sin_cond_2d = geom["cos_cond_2d"], geom["sin_cond_2d"]
         order_caches = geom["order_caches"]
         conv_indices = geom["conv_indices"]
@@ -789,6 +800,7 @@ class OptimizedLatDitRunner:
             fwd_idx, bwd_idx, cu_seqlens, max_len = order_caches[block.order_idx]
 
             # --- 1. Windowed Self-Attention on 3D Voxels ---
+            h_x_precomputed: Optional[torch.Tensor] = None
             if b_idx == 0 and reuse_b0_msa:
                 x = self._last_b0_x_after_msa
             else:
@@ -797,11 +809,24 @@ class OptimizedLatDitRunner:
                 q_scale = getattr(block.qk_norm, "_q_scale_cast", block.qk_norm.q_scale)
                 k_scale = getattr(block.qk_norm, "_k_scale_cast", block.qk_norm.k_scale)
                 qkv_sorted = fused_qknorm_rope3d_gather(
-                    qkv, q_scale, k_scale, cos_vox, sin_vox, fwd_idx, use_triton=use_triton
+                    qkv,
+                    q_scale,
+                    k_scale,
+                    cos_vox,
+                    sin_vox,
+                    fwd_idx,
+                    coords=h_coords,
+                    use_triton=use_triton,
                 )
                 attn_out = flash_varlen_qkvpacked_already_sorted(qkv_sorted, bwd_idx, cu_seqlens, max_len)
                 h = block.to_out(attn_out.reshape(N, D))
-                x = fast_gate_add(x, h, sizes, g_msa)
+                if b_idx > 0 and not use_1tok_uncond:
+                    # Fused MSA Gate-Add + Cross-Attention LayerNorm & AdaLN Modulation in 1 Triton kernel!
+                    x, h_x_precomputed = fast_gate_add_and_modulate(
+                        x, h, sizes, g_msa, s_cr, sh_cr, use_triton=use_triton
+                    )
+                else:
+                    x = fast_gate_add(x, h, sizes, g_msa)
                 if b_idx == 0 and not uncond:
                     self._last_b0_x_after_msa = x
                     self._last_b0_t_val = t_val
@@ -1000,7 +1025,7 @@ class OptimizedLatDitRunner:
                         cr_out_for_x = self._last_b0_cr_proj
                     else:
                         # Reuse cached K,V of conditioning from previous step; only compute Q_x and x->cond cross-attn!
-                        h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                        h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
                         q_w = getattr(block, "_to_q_cross_w", None)
                         if q_w is not None:
                             q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
@@ -1046,7 +1071,7 @@ class OptimizedLatDitRunner:
                             cond, cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
                         )
 
-                    h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                    h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
                     if skip_cond_out:
                         # Exact Cross-KV Slice: when skip_cond_out=True, Q_cc ([L, D]) is never used!
                         # Compute only K_cc, V_cc ([L, 2*D]), cutting 33.3% of DINO cross-QKV GEMM FLOPs!
@@ -1182,7 +1207,7 @@ class OptimizedLatDitRunner:
                         h_x_cross = block.to_out_cross(v_cc)
                     cr_out_for_x = h_x_cross
                 elif cached_cond_block7 is not None:
-                    h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                    h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
                     kv_cc = cached_cond_block7[b_idx]
                     h_x_out = flash_cross_attn(
@@ -1192,7 +1217,7 @@ class OptimizedLatDitRunner:
                 else:
                     L = cond.shape[1]
                     h_cond_cr = fast_modulate_preln_cond(ln_cond_after_7, cs_cr, csh_cr)
-                    h_x = fast_modulate(x, sizes, s_cr, sh_cr)
+                    h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
                     kv_cc = block.cond_to_kv_cross(h_cond_cr).view(batch_size * L, 2, H, HD)
                     if need_full_kv_cc and kv_cc_cache_out is not None:
@@ -1427,6 +1452,8 @@ class OptimizedLatDitRunner:
         magnus_gamma = float(getattr(self.solver_config, "magnus_commutator_gamma", 0.015))
         use_cheb_pade = bool(getattr(self.solver_config, "chebyshev_pade_resolvent", True))
         pade_eta = float(getattr(self.solver_config, "pade_resolvent_eta", 0.018))
+        use_symp_verlet = bool(getattr(self.solver_config, "symplectic_verlet_kick", True))
+        hap_omega = float(getattr(self.solver_config, "hamiltonian_hap_omega", 0.016))
         num_blocks = len(self.flow.blocks)
         raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
         mid_end_eff = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
@@ -1696,7 +1723,18 @@ class OptimizedLatDitRunner:
                     v_norm_sq = (v * v).sum().clamp_min(1e-6)
                     proj_coeff = (dv_b * v).sum() / v_norm_sq
                     dv_perp = torch.addcmul(dv_b, v, proj_coeff, value=-1.0)
+                    if use_symp_verlet and hap_omega > 0.0:
+                        # Quantum Symplectic Velocity-Verlet Bi-Orthogonal Integrator (Hairer, Lubich & Wanner 2006)
+                        # + Hamiltonian Action-Principle Potential-Well Modulation (MD-HAP-Scheduler 2026):
+                        # Project `dv_perp` onto the Lagrangian bi-orthogonal intersection `v^perp \cap x_t^perp`,
+                        # preserving both instantaneous kinetic energy ||v||^2 and spherical shell ||x_t||^2!
+                        xt_norm_sq = (xt * xt).sum().clamp_min(1e-6)
+                        proj_xt = (dv_perp * xt).sum() / xt_norm_sq
+                        dv_perp = torch.addcmul(dv_perp, xt, proj_xt, value=-1.0)
                     eff_cd = cd_omega + magnus_gamma * dt
+                    if use_symp_verlet and hap_omega > 0.0:
+                        s_hap = max(0.0, 1.0 - t_val)
+                        eff_cd = eff_cd * (1.0 + hap_omega * s_hap) * math.exp(-hap_omega * s_hap * s_hap)
                     if use_cheb_pade and pade_eta > 0.0:
                         # Quantum Chebyshev-Pade [1/1] Resolvent (Shanks 1955 / Baker & Graves-Morris 1996):
                         # Modulate by Chebyshev T_2(2*t - 1) and regularize via Green's resolvent 1 / (1 + eta * ||dv_perp||^2 / ||v||^2)!

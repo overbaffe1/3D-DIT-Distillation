@@ -906,8 +906,11 @@ def apply_rope_cached_3d(
     tokens: torch.Tensor,
     cos_vox: torch.Tensor,
     sin_vox: torch.Tensor,
+    coords: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Apply 3D RoPE using precomputed (cos_vox, sin_vox) [N, 1, 3, 16] to tokens [N, H, 96]."""
+    """Apply 3D RoPE using precomputed (cos_vox, sin_vox) [N, 1, 3, 16] or 1D table [64, 16] to tokens [N, H, 96]."""
+    if cos_vox.ndim == 2 and coords is not None:
+        cos_vox, sin_vox = lookup_rope_3d(coords[:, 1:], cos_vox, sin_vox)
     N, H, D = tokens.shape
     Q = cos_vox.shape[-1]
     tok = tokens.float().view(N, H, 3, 2, Q)
@@ -1007,18 +1010,21 @@ if HAS_TRITON:
         k_scale_ptr,
         cos_ptr,
         sin_ptr,
+        coords_ptr,
         fwd_idx_ptr,
         out_qkv_ptr,
         N,
         H: tl.constexpr,
         Q: tl.constexpr,
+        USE_TABLE: tl.constexpr,
         eps: tl.constexpr,
     ):
         """
         Fuses for 3D voxels (D = 6 * Q = 96, H = 16):
           1. Gather from `src_n = fwd_idx[dst_n]`
           2. RMSNorm(q) * q_scale, RMSNorm(k) * k_scale
-          3. 3D RoPE rotation on q and k using precomputed cos/sin [N, 3, Q]
+          3. 3D RoPE rotation on q and k using either L1 4KB 1D table [64, Q] via coords [N, 4]
+             (USE_TABLE=True) or precomputed cos/sin [N, 3, Q] (USE_TABLE=False)
           4. Copy v and write packed [N, 3, H, D] directly in Hilbert-sorted order!
         """
         dst_n = tl.program_id(0)
@@ -1031,15 +1037,26 @@ if HAS_TRITON:
         stride_3 = H * D
         stride_h = D
 
-        # Load cos/sin for src_n (3 axes * Q)
-        cos_base = cos_ptr + src_n * (3 * Q)
-        sin_base = sin_ptr + src_n * (3 * Q)
-        c0 = tl.load(cos_base + 0 * Q + offs).to(tl.float32)
-        c1 = tl.load(cos_base + 1 * Q + offs).to(tl.float32)
-        c2 = tl.load(cos_base + 2 * Q + offs).to(tl.float32)
-        s0 = tl.load(sin_base + 0 * Q + offs).to(tl.float32)
-        s1 = tl.load(sin_base + 1 * Q + offs).to(tl.float32)
-        s2 = tl.load(sin_base + 2 * Q + offs).to(tl.float32)
+        if USE_TABLE:
+            coord_base = coords_ptr + src_n * 4
+            fx = tl.load(coord_base + 1)
+            fy = tl.load(coord_base + 2)
+            fz = tl.load(coord_base + 3)
+            c0 = tl.load(cos_ptr + fx * Q + offs).to(tl.float32)
+            c1 = tl.load(cos_ptr + fy * Q + offs).to(tl.float32)
+            c2 = tl.load(cos_ptr + fz * Q + offs).to(tl.float32)
+            s0 = tl.load(sin_ptr + fx * Q + offs).to(tl.float32)
+            s1 = tl.load(sin_ptr + fy * Q + offs).to(tl.float32)
+            s2 = tl.load(sin_ptr + fz * Q + offs).to(tl.float32)
+        else:
+            cos_base = cos_ptr + src_n * (3 * Q)
+            sin_base = sin_ptr + src_n * (3 * Q)
+            c0 = tl.load(cos_base + 0 * Q + offs).to(tl.float32)
+            c1 = tl.load(cos_base + 1 * Q + offs).to(tl.float32)
+            c2 = tl.load(cos_base + 2 * Q + offs).to(tl.float32)
+            s0 = tl.load(sin_base + 0 * Q + offs).to(tl.float32)
+            s1 = tl.load(sin_base + 1 * Q + offs).to(tl.float32)
+            s2 = tl.load(sin_base + 2 * Q + offs).to(tl.float32)
 
         # --- Process Q (idx 0) ---
         q_base = qkv_ptr + src_n * stride_n + 0 * stride_3 + h * stride_h
@@ -1285,31 +1302,37 @@ def fused_qknorm_rope3d_gather(
     cos_vox: torch.Tensor,
     sin_vox: torch.Tensor,
     fwd_indices: torch.Tensor,
+    coords: Optional[torch.Tensor] = None,
     use_triton: bool = True,
 ) -> torch.Tensor:
     """
     Input:
       qkv: [N, 3, H, D] (H=16, D=96)
       q_scale, k_scale: [H, D]
-      cos_vox, sin_vox: [N, 1, 3, 16]
+      cos_vox, sin_vox: [N, 1, 3, 16] or 1D L1 table [64, 16] (when coords [N, 4] is provided)
       fwd_indices: [N]
+      coords: Optional [N, 4] int32 voxel coordinates for direct L1 table lookup
     Output:
       qkv_sorted: [N, 3, H, D] gathered in fwd_indices order with QKNorm + 3D RoPE applied.
     """
     N, _, H, D = qkv.shape
     if use_triton and HAS_TRITON and qkv.is_cuda and D == 96:
         out_qkv = torch.empty_like(qkv)
+        use_table = cos_vox.ndim == 2 and coords is not None and coords.is_contiguous()
+        coords_arg = coords if use_table else fwd_indices
         _fused_qknorm_rope3d_gather_kernel[(N, H)](
             qkv,
             q_scale,
             k_scale,
             cos_vox,
             sin_vox,
+            coords_arg,
             fwd_indices,
             out_qkv,
             N=N,
             H=H,
             Q=16,
+            USE_TABLE=use_table,
             eps=1e-6,
             num_warps=1,
         )
@@ -1318,8 +1341,8 @@ def fused_qknorm_rope3d_gather(
     q, k, v = qkv.unbind(dim=-3)
     q = fast_rms_norm(q) * q_scale.to(q.dtype)
     k = fast_rms_norm(k) * k_scale.to(k.dtype)
-    q = apply_rope_cached_3d(q, cos_vox, sin_vox)
-    k = apply_rope_cached_3d(k, cos_vox, sin_vox)
+    q = apply_rope_cached_3d(q, cos_vox, sin_vox, coords=coords)
+    k = apply_rope_cached_3d(k, cos_vox, sin_vox, coords=coords)
     return torch.stack([q, k, v], dim=-3)[fwd_indices]
 
 
@@ -1400,7 +1423,7 @@ def flash_cross_attn(
     ).transpose(1, 2).squeeze(0)
 
 
-def build_conv_indices_fast(coords: torch.Tensor) -> List[torch.Tensor]:
+def build_conv_indices_fast(coords: torch.Tensor, already_sorted: bool = False) -> List[torch.Tensor]:
     """Compute 3D submanifold 3x3x3 neighbor indices once per sample."""
     if coords.is_cuda:
         if _LIBSPARSE is None:
@@ -1410,15 +1433,19 @@ def build_conv_indices_fast(coords: torch.Tensor) -> List[torch.Tensor]:
             return ops_sparse.get_conv_indices(coords)
         return _LIBSPARSE.conv_indices(coords.int().contiguous())
 
-    # CPU fallback
+    # CPU fallback (skips argsort when coords are already lexicographically sorted!)
     N = coords.shape[0]
     b = coords[:, 0].to(torch.int64)
     x = coords[:, 1].to(torch.int64)
     y = coords[:, 2].to(torch.int64)
     z = coords[:, 3].to(torch.int64)
     keys = (b << 36) | (x << 24) | (y << 12) | z
-    order = torch.argsort(keys)
-    sorted_keys = keys[order]
+    if already_sorted:
+        sorted_keys = keys
+        order = None
+    else:
+        order = torch.argsort(keys)
+        sorted_keys = keys[order]
 
     out = torch.full((N, 27), -1, dtype=torch.int32, device=coords.device)
     d = 0
@@ -1433,7 +1460,10 @@ def build_conv_indices_fast(coords: torch.Tensor) -> List[torch.Tensor]:
                 idx = torch.searchsorted(sorted_keys, qkeys)
                 idx_clamped = idx.clamp(max=N - 1)
                 found = valid & (idx < N) & (sorted_keys[idx_clamped] == qkeys)
-                out[found, d] = order[idx_clamped[found]].to(torch.int32)
+                if order is None:
+                    out[found, d] = idx_clamped[found].to(torch.int32)
+                else:
+                    out[found, d] = order[idx_clamped[found]].to(torch.int32)
                 d += 1
     return [out]
 

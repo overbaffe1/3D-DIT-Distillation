@@ -49,6 +49,11 @@ def test_submission_format() -> None:
         report_zip = inspect_submission(sub_zip)
         print(format_report(report_zip))
         assert report_zip.ok, f"Zip submission check failed: {report_zip.errors}"
+    for sc_rel in ("lib/solver_config.json", "weights/solver_config.json"):
+        sc_data = json.loads((_ROOT / sc_rel).read_text(encoding="utf-8"))
+        assert sc_data.get("symplectic_verlet_kick") is True
+        assert sc_data.get("l1_table_rope3d") is True
+        assert sc_data.get("fused_msa_to_cr_modulate") is True
     print("   [PASS] Submission format verified.")
 
 
