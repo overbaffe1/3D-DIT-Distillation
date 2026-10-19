@@ -421,14 +421,20 @@ class CalibratedTeacherEnsemble:
                 ]
                 if apply_readout and step_idx < len(rk_cfg_mixers) and len(rk_cfg_mixers[step_idx]) == self.latent_dim:
                     b_cfg = rk_cfg_mixers[step_idx]
+                    is_skipped_neg = step_idx not in eval_uncond_steps
                     for m in range(self.num_modes):
                         dm = cur_delta[m]
+                        vpm = v_pos[m]
                         rc = rk_corr[m]
                         for c1 in range(self.latent_dim):
                             b_row = b_cfg[c1]
                             acc = 0.0
-                            for c2 in range(self.latent_dim):
-                                acc += float(b_row[c2]) * dm[c2]
+                            if is_skipped_neg:
+                                for c2 in range(self.latent_dim):
+                                    acc += float(b_row[c2]) * (dm[c2] * vpm[c2])
+                            else:
+                                for c2 in range(self.latent_dim):
+                                    acc += float(b_row[c2]) * dm[c2]
                             rc[c1] += acc
             else:
                 v = v_pos
@@ -600,7 +606,14 @@ class CalibratedTeacherEnsemble:
                     [v_pos[m][c] - neg_used[m][c] for c in range(self.latent_dim)]
                     for m in range(self.num_modes)
                 ]
-                cfg_delta_stages.append(cur_delta)
+                if step_idx not in eval_uncond_steps:
+                    cfg_rk_stage = [
+                        [cur_delta[m][c] * v_pos[m][c] for c in range(self.latent_dim)]
+                        for m in range(self.num_modes)
+                    ]
+                else:
+                    cfg_rk_stage = cur_delta
+                cfg_delta_stages.append(cfg_rk_stage)
                 cfg_mult = float(cfg_scales[step_idx]) if step_idx < len(cfg_scales) else 1.0
                 w_base = guidance_scale * cfg_mult
                 cfg_ch_row = step_cfg_ch[step_idx] if step_idx < len(step_cfg_ch) else [1.0] * self.latent_dim
@@ -700,17 +713,8 @@ class CalibratedTeacherEnsemble:
         public_score = quality_lpips * speedup
         final_log_score = quality_lpips * (1.0 + math.log2(max(1.0, speedup)))
 
-        # Gentle interior harmonic regularization so parameters stay well-conditioned
-        reg_pen = 0.0
-        for s_v in cfg.get("qaoa_t_eval_shifts", []):
-            reg_pen += 0.05 * ((float(s_v) - 0.020) ** 2)
-        for c_m in cfg.get("qaoa_cfg_scales", [])[:n_guided]:
-            reg_pen += 0.015 * ((float(c_m) - 1.0) ** 2)
-        for m_idx, m_v in enumerate(cfg.get("qaoa_momentum", [])):
-            if 0 < m_idx != n_guided:
-                reg_pen += 0.05 * ((float(m_v) - 0.025) ** 2)
-
-        qaoa_energy = rel_l2 + 2.0 * (1.0 - cos_sim) + reg_pen
+        # Pure trajectory functional energy (zero artificial parameter penalty)
+        qaoa_energy = rel_l2 + 2.0 * (1.0 - cos_sim)
 
         return {
             "qaoa_energy": qaoa_energy,
@@ -1028,7 +1032,7 @@ def optimize_butcher_rk_stage(
         for c1 in range(D):
             for c2 in range(D):
                 old_v = float(target_mat[c1][c2])
-                new_v = max(-3.0, min(3.0, old_v + blend_alpha * dW[base_idx + c2][c1]))
+                new_v = max(-2500.0, min(2500.0, old_v + blend_alpha * dW[base_idx + c2][c1]))
                 target_mat[c1][c2] = new_v
 
     return cand
@@ -1318,7 +1322,13 @@ def run_qaoa_optimization(
             if (it // 8) % 5 == 0:
                 best_gn = cand
                 best_gn_e = best_metrics["qaoa_energy"]
-                for r_lam, b_alp in ((2.5e-4, 0.25), (2.5e-5, 0.25), (3.0e-6, 0.25), (4.0e-7, 0.25), (5.0e-8, 0.22)):
+                for r_lam, b_alp in (
+                    (1.0e-6, 0.50),
+                    (1.0e-9, 0.85),
+                    (1.0e-12, 1.00),
+                    (1.0e-14, 1.00),
+                    (1.0e-15, 1.00),
+                ):
                     c_gn = optimize_butcher_rk_stage(
                         sim, cand, stage_selector=generation, blend_alpha=b_alp, ridge_lambda=r_lam
                     )
@@ -1335,16 +1345,16 @@ def run_qaoa_optimization(
                 if which_rk == 0:
                     k_idx = rng.randrange(total_steps)
                     cand["qaoa_rk_pos_mixers"][k_idx][c1][c2] = max(
-                        -3.0, min(3.0, float(cand["qaoa_rk_pos_mixers"][k_idx][c1][c2]) + delta_rk)
+                        -2500.0, min(2500.0, float(cand["qaoa_rk_pos_mixers"][k_idx][c1][c2]) + delta_rk)
                     )
                 elif which_rk == 1:
                     k_idx = rng.randrange(n_guided)
                     cand["qaoa_rk_cfg_mixers"][k_idx][c1][c2] = max(
-                        -3.0, min(3.0, float(cand["qaoa_rk_cfg_mixers"][k_idx][c1][c2]) + delta_rk)
+                        -2500.0, min(2500.0, float(cand["qaoa_rk_cfg_mixers"][k_idx][c1][c2]) + delta_rk)
                     )
                 else:
                     cand["qaoa_rk_init_mixer"][c1][c2] = max(
-                        -3.0, min(3.0, float(cand["qaoa_rk_init_mixer"][c1][c2]) + delta_rk)
+                        -2500.0, min(2500.0, float(cand["qaoa_rk_init_mixer"][c1][c2]) + delta_rk)
                     )
 
         else:

@@ -843,10 +843,11 @@ class OptimizedLatDitRunner:
                         device=device,
                         dtype=xt.dtype,
                     )
+                    cfg_rk_feat = (cur_delta * v_pos) if (not eval_neg) else cur_delta
                     if rk_corr is None:
-                        rk_corr = cur_delta.to(xt.dtype) @ b_cfg.T
+                        rk_corr = cfg_rk_feat.to(xt.dtype) @ b_cfg.T
                     else:
-                        rk_corr = torch.addmm(rk_corr, cur_delta.to(xt.dtype), b_cfg.T)
+                        rk_corr = torch.addmm(rk_corr, cfg_rk_feat.to(xt.dtype), b_cfg.T)
             else:
                 v = v_pos
 
