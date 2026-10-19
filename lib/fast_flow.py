@@ -671,12 +671,10 @@ class OptimizedLatDitRunner:
                     # x -> cond output is identically v_cond_cross for all N voxels!
                     h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
                     q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
-
                     h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
-                    x = fast_gate_add(x, h_x_cross, sizes, g_cr)
 
                     if not skip_cond_out:
-                        # cond -> x only needed if subsequent blocks read `cond`
+                        # cond -> x only needed if subsequent blocks read `cond` (must use `x` before gate_add!)
                         h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                         kv_w = getattr(block, "_to_kv_cross_w", None)
                         if kv_w is not None:
@@ -693,6 +691,8 @@ class OptimizedLatDitRunner:
                         h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
                         hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
                         cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
+
+                    x = fast_gate_add(x, h_x_cross, sizes, g_cr)
 
                 elif cached_cond_block7 is not None:
                     # PAB (Pyramid Attention Broadcast, ICLR 2025): on fast FBCache steps, broadcast
