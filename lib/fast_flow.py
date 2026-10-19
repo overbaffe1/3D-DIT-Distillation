@@ -687,11 +687,20 @@ class OptimizedLatDitRunner:
         eval_uncond_steps = self.solver_config.eval_uncond_steps
 
         prev_v: Optional[torch.Tensor] = None
+        prev2_v: Optional[torch.Tensor] = None
+        prev_v_pos: Optional[torch.Tensor] = None
         prev_dt: Optional[float] = None
         last_delta: Optional[torch.Tensor] = None
         prev_delta: Optional[torch.Tensor] = None
         last_neg: Optional[torch.Tensor] = None
         last_cond7: Optional[List[torch.Tensor]] = None
+        rk_corr: Optional[torch.Tensor] = None
+
+        if use_qaoa and len(self.solver_config.qaoa_rk_init_mixer) == self.latent_dim:
+            b_init = torch.tensor(
+                self.solver_config.qaoa_rk_init_mixer, device=device, dtype=xt.dtype
+            )
+            rk_corr = xt @ b_init.T
 
         for step_idx in range(total_steps):
             t_val = float(t_list[step_idx])
@@ -703,6 +712,7 @@ class OptimizedLatDitRunner:
             # Reset multistep history across the t=0.5 CFG boundary jump
             if step_idx == n_guided:
                 prev_v = None
+                prev2_v = None
                 prev_dt = None
 
             eval_cond = should_eval_cond(step_idx, n_guided, cond7_stride, eval_cond_steps)
@@ -737,7 +747,21 @@ class OptimizedLatDitRunner:
                     last_neg = v_neg
                 else:
                     if cfg_mode == "neg_reuse" and last_neg is not None:
-                        cur_delta = v_pos - last_neg
+                        if (
+                            use_qaoa
+                            and prev_v_pos is not None
+                            and step_idx < len(self.solver_config.qaoa_neg_fd_scales)
+                            and len(self.solver_config.qaoa_neg_fd_scales[step_idx]) == self.latent_dim
+                        ):
+                            fd_vec = torch.tensor(
+                                self.solver_config.qaoa_neg_fd_scales[step_idx],
+                                device=device,
+                                dtype=v_pos.dtype,
+                            ).view(1, -1)
+                            neg_est = torch.addcmul(last_neg, v_pos - prev_v_pos, fd_vec, value=1.0)
+                            cur_delta = v_pos - neg_est
+                        else:
+                            cur_delta = v_pos - last_neg
                     elif cfg_mode == "delta_extrapolate" and prev_delta is not None:
                         cur_delta = last_delta + cfg_alpha * (last_delta - prev_delta)
                     else:
@@ -746,9 +770,52 @@ class OptimizedLatDitRunner:
                 cfg_mult = 1.0
                 if use_qaoa and step_idx < len(self.solver_config.qaoa_cfg_scales):
                     cfg_mult = float(self.solver_config.qaoa_cfg_scales[step_idx])
-                v = v_pos + (guidance_scale * cfg_mult) * cur_delta
+                if (
+                    use_qaoa
+                    and step_idx < len(self.solver_config.qaoa_step_cfg_channels)
+                    and len(self.solver_config.qaoa_step_cfg_channels[step_idx]) == self.latent_dim
+                ):
+                    cfg_ch = torch.tensor(
+                        self.solver_config.qaoa_step_cfg_channels[step_idx],
+                        device=device,
+                        dtype=v_pos.dtype,
+                    ).view(1, -1)
+                    v = torch.addcmul(v_pos, cur_delta, cfg_ch, value=guidance_scale * cfg_mult)
+                else:
+                    v = v_pos + (guidance_scale * cfg_mult) * cur_delta
+                if (
+                    use_qaoa
+                    and step_idx < len(self.solver_config.qaoa_rk_cfg_mixers)
+                    and len(self.solver_config.qaoa_rk_cfg_mixers[step_idx]) == self.latent_dim
+                ):
+                    b_cfg = torch.tensor(
+                        self.solver_config.qaoa_rk_cfg_mixers[step_idx],
+                        device=device,
+                        dtype=xt.dtype,
+                    )
+                    if rk_corr is None:
+                        rk_corr = cur_delta.to(xt.dtype) @ b_cfg.T
+                    else:
+                        rk_corr = torch.addmm(rk_corr, cur_delta.to(xt.dtype), b_cfg.T)
             else:
                 v = v_pos
+
+            if (
+                use_qaoa
+                and step_idx < len(self.solver_config.qaoa_rk_pos_mixers)
+                and len(self.solver_config.qaoa_rk_pos_mixers[step_idx]) == self.latent_dim
+            ):
+                b_pos = torch.tensor(
+                    self.solver_config.qaoa_rk_pos_mixers[step_idx],
+                    device=device,
+                    dtype=xt.dtype,
+                )
+                if rk_corr is None:
+                    rk_corr = v_pos.to(xt.dtype) @ b_pos.T
+                else:
+                    rk_corr = torch.addmm(rk_corr, v_pos.to(xt.dtype), b_pos.T)
+
+            prev_v_pos = v_pos
 
             # Optional learned per-step calibration from distillation
             if self.step_calibration is not None:
@@ -765,10 +832,36 @@ class OptimizedLatDitRunner:
                 mom = 0.0
                 if step_idx < len(self.solver_config.qaoa_momentum):
                     mom = float(self.solver_config.qaoa_momentum[step_idx])
-                if (prev_v is not None) and abs(mom) > 1e-7:
-                    v_step = (1.0 + mom) * v - mom * prev_v
+                has_mom_ch = (
+                    step_idx < len(self.solver_config.qaoa_step_momentum_channels)
+                    and len(self.solver_config.qaoa_step_momentum_channels[step_idx]) == self.latent_dim
+                )
+                if prev_v is not None and (abs(mom) > 1e-7 or has_mom_ch):
+                    if has_mom_ch:
+                        mom_vec = torch.tensor(
+                            [mom + float(x) for x in self.solver_config.qaoa_step_momentum_channels[step_idx]],
+                            device=device,
+                            dtype=v.dtype,
+                        ).view(1, -1)
+                        v_step = torch.addcmul(v, v - prev_v, mom_vec, value=1.0)
+                    else:
+                        v_step = (1.0 + mom) * v - mom * prev_v
                 else:
                     v_step = v
+
+                if (
+                    prev2_v is not None
+                    and prev_v is not None
+                    and step_idx < len(self.solver_config.qaoa_step_accel_channels)
+                    and len(self.solver_config.qaoa_step_accel_channels[step_idx]) == self.latent_dim
+                ):
+                    acc_vec = torch.tensor(
+                        self.solver_config.qaoa_step_accel_channels[step_idx],
+                        device=device,
+                        dtype=v.dtype,
+                    ).view(1, -1)
+                    v_step = torch.addcmul(v_step, v - 2.0 * prev_v + prev2_v, acc_vec, value=1.0)
+
                 dt_scale = 1.0
                 if step_idx < len(self.solver_config.qaoa_dt_scales):
                     dt_scale = float(self.solver_config.qaoa_dt_scales[step_idx])
@@ -781,6 +874,7 @@ class OptimizedLatDitRunner:
                 v_step = v
                 dt_eff = dt
 
+            prev2_v = prev_v
             prev_v = v
             prev_dt = dt
             if (
@@ -797,7 +891,12 @@ class OptimizedLatDitRunner:
             else:
                 xt = xt - dt_eff * v_step
 
-        # Optional QAOA per-channel output calibration
+        # Optional QAOA 16x16 cross-channel linear readout mixer + per-channel scale/bias + Kerr cubic term
+        if use_qaoa and len(self.solver_config.qaoa_channel_mixer) == self.latent_dim:
+            mat = torch.tensor(
+                self.solver_config.qaoa_channel_mixer, device=device, dtype=xt.dtype
+            )
+            xt = xt @ mat.T
         if use_qaoa and len(self.solver_config.qaoa_channel_scale) == self.latent_dim:
             ch_s = torch.tensor(
                 self.solver_config.qaoa_channel_scale, device=device, dtype=torch.float32
@@ -806,6 +905,13 @@ class OptimizedLatDitRunner:
                 self.solver_config.qaoa_channel_bias, device=device, dtype=torch.float32
             ).view(1, -1)
             xt = xt * ch_s + ch_b
+        if rk_corr is not None:
+            xt = xt + rk_corr
+        if use_qaoa and len(self.solver_config.qaoa_kerr_scales) == self.latent_dim:
+            k_vec = torch.tensor(
+                self.solver_config.qaoa_kerr_scales, device=device, dtype=xt.dtype
+            ).view(1, -1)
+            xt = torch.addcmul(xt, xt * xt * xt, k_vec, value=1.0)
 
         # Unpermute back to original vox_idxs order and denormalize once
         xt_orig = xt[geom["up_widx"]]

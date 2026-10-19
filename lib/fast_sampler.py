@@ -36,8 +36,17 @@ class SolverConfig:
     qaoa_cfg_scales: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 0.0])
     qaoa_momentum: List[float] = field(default_factory=lambda: [0.0, 0.04, 0.04, 0.0])
     qaoa_step_channel_scales: List[List[float]] = field(default_factory=list)
+    qaoa_step_cfg_channels: List[List[float]] = field(default_factory=list)
+    qaoa_neg_fd_scales: List[List[float]] = field(default_factory=list)
+    qaoa_step_momentum_channels: List[List[float]] = field(default_factory=list)
+    qaoa_step_accel_channels: List[List[float]] = field(default_factory=list)
+    qaoa_rk_pos_mixers: List[List[List[float]]] = field(default_factory=list)
+    qaoa_rk_cfg_mixers: List[List[List[float]]] = field(default_factory=list)
+    qaoa_rk_init_mixer: List[List[float]] = field(default_factory=list)
+    qaoa_channel_mixer: List[List[float]] = field(default_factory=list)
     qaoa_channel_scale: List[float] = field(default_factory=lambda: [1.0] * 16)
     qaoa_channel_bias: List[float] = field(default_factory=lambda: [0.0] * 16)
+    qaoa_kerr_scales: List[float] = field(default_factory=lambda: [0.0] * 16)
     precompute_static_geometry: bool = True
     precompute_rope_tables: bool = True
     precompute_time_gates: bool = True
