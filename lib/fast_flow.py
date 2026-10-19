@@ -497,15 +497,15 @@ class OptimizedLatDitRunner:
         cached_mid_delta: Optional[torch.Tensor] = None,
         mid_cache_scale: float = 1.0,
         return_mid_delta: bool = False,
-        return_deep_delta: bool = False,
-        custom_mid_start: Optional[int] = None,
+        cached_cond_delta: Optional[torch.Tensor] = None,
+        return_cond_delta: bool = False,
         cached_ln_cond7: Optional[torch.Tensor] = None,
         return_ln_cond7: bool = False,
     ):
         """
         Execute 24-block FlowModel forward pass using static geometry cache,
         fused Triton kernels, exact 1-token unconditional condensation,
-        and optional QAOA-calibrated two-tier (15-block / 21-block) residual DeepCache.
+        and QAOA-calibrated 22-block First-Block Cache (FBC) + Delta-DiT Cond Refresh.
         """
         device = xt_sorted.device
         compute_dtype = self._compute_dtype(device)
@@ -542,27 +542,29 @@ class OptimizedLatDitRunner:
         use_triton = self.solver_config.use_fused_triton_kernels
 
         num_blocks = len(self.flow.blocks)
-        deep_start = int(getattr(self.solver_config, "deep_block_start", 2))
-        mid_start = int(custom_mid_start) if custom_mid_start is not None else int(getattr(self.solver_config, "mid_block_start", 8))
-        mid_end = int(getattr(self.solver_config, "mid_block_end", 23))
-        can_mid_cache = (mid_end <= num_blocks) and (0 < mid_start < mid_end)
+        mid_start = int(getattr(self.solver_config, "mid_block_start", 1))
+        mid_end = min(int(getattr(self.solver_config, "mid_block_end", 23)), num_blocks - 1)
+        can_mid_cache = (0 < mid_start < mid_end)
         x_mid_in: Optional[torch.Tensor] = None
-        x_deep_in: Optional[torch.Tensor] = None
+        cond_mid_in: Optional[torch.Tensor] = None
         mid_delta_out: Optional[torch.Tensor] = None
-        deep_delta_out: Optional[torch.Tensor] = None
+        cond_delta_out: Optional[torch.Tensor] = None
 
         for b_idx, block in enumerate(self.flow.blocks):
             if can_mid_cache:
                 if cached_mid_delta is not None and mid_start <= b_idx < mid_end:
                     if b_idx == mid_start:
                         x = x + cached_mid_delta * float(mid_cache_scale)
+                        if cached_cond_delta is not None and ln_cond_after_7 is None:
+                            ln_cond_after_7 = fast_layer_norm(cond + cached_cond_delta)
                     if kv_cc_cache_out is not None:
                         kv_cc_cache_out.append(None)
                     continue
-                if return_deep_delta and b_idx == deep_start:
-                    x_deep_in = x
-                if return_mid_delta and b_idx == mid_start:
-                    x_mid_in = x
+                if b_idx == mid_start:
+                    if return_mid_delta:
+                        x_mid_in = x
+                    if return_cond_delta:
+                        cond_mid_in = cond
 
             s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = block_gates[b_idx]
             fwd_idx, bwd_idx, cu_seqlens, max_len = order_caches[block.order_idx]
@@ -678,6 +680,8 @@ class OptimizedLatDitRunner:
                     cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
 
                 if b_idx == self.cond_depth - 1 and cached_cond_block7 is None:
+                    if return_cond_delta and cond_mid_in is not None:
+                        cond_delta_out = cond - cond_mid_in
                     ln_cond_after_7 = fast_layer_norm(cond)
 
             else:
@@ -725,18 +729,15 @@ class OptimizedLatDitRunner:
             h_mlp = block.ffn1(fast_swiglu(h_gate, h1))
             x = fast_gate_add(x, h_mlp, sizes, g_mlp)
 
-            if can_mid_cache and b_idx == (mid_end - 1):
-                if return_mid_delta and x_mid_in is not None:
-                    mid_delta_out = x - x_mid_in
-                if return_deep_delta and x_deep_in is not None:
-                    deep_delta_out = x - x_deep_in
+            if can_mid_cache and b_idx == (mid_end - 1) and return_mid_delta and x_mid_in is not None:
+                mid_delta_out = x - x_mid_in
 
         # Output LayerNorm + exact FP32 Unpatchify projection (zero BF16 output truncation)
         x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
         out = F.linear(x.float(), self._unpatchify_w_fp32)
 
-        if return_cond_block7 and return_mid_delta and return_deep_delta:
-            return out, kv_cc_cache_out, mid_delta_out, deep_delta_out
+        if return_cond_block7 and return_mid_delta and return_cond_delta:
+            return out, kv_cc_cache_out, mid_delta_out, cond_delta_out
         if return_cond_block7 and return_mid_delta:
             return out, kv_cc_cache_out, mid_delta_out
         if return_cond_block7:
@@ -863,14 +864,12 @@ class OptimizedLatDitRunner:
         last_neg: Optional[torch.Tensor] = None
         last_cond7: Optional[List[torch.Tensor]] = None
         last_mid_delta: Optional[torch.Tensor] = None
-        last_deep_delta: Optional[torch.Tensor] = None
+        last_cond_delta: Optional[torch.Tensor] = None
         last_uncond_mid_delta: Optional[torch.Tensor] = None
         last_uncond_ln7: Optional[torch.Tensor] = None
         rk_corr: Optional[torch.Tensor] = None
         use_mid_cache = bool(getattr(self.solver_config, "mid_block_cache_enabled", False))
         use_uncond_mid_cache = use_mid_cache and bool(getattr(self.solver_config, "uncond_mid_block_cache", True))
-        deep_start_idx = int(getattr(self.solver_config, "deep_block_start", 2))
-        mid_start_idx = int(getattr(self.solver_config, "mid_block_start", 8))
         mid_scales = getattr(self.solver_config, "qaoa_mid_cache_scales", [])
         uncond_mid_sc = float(getattr(self.solver_config, "qaoa_uncond_mid_scale", 0.95))
 
@@ -897,7 +896,7 @@ class OptimizedLatDitRunner:
             mid_sc = float(mid_scales[step_idx]) if step_idx < len(mid_scales) else 1.0
 
             if (not eval_cond) and (last_cond7 is not None):
-                # Fast steps (1, 3): skip 21 blocks (2..22) using two-tier `last_deep_delta`!
+                # Fast steps (1, 3): execute only blocks 0 and 23 (skipping 22 middle blocks 1..22)!
                 v_pos = self.forward_flow_fast(
                     xt,
                     t_eval,
@@ -906,13 +905,12 @@ class OptimizedLatDitRunner:
                     geom,
                     uncond=False,
                     cached_cond_block7=last_cond7,
-                    cached_mid_delta=last_deep_delta if (use_mid_cache and last_deep_delta is not None) else (last_mid_delta if use_mid_cache else None),
+                    cached_mid_delta=last_mid_delta if use_mid_cache else None,
                     mid_cache_scale=mid_sc,
-                    custom_mid_start=deep_start_idx if (use_mid_cache and last_deep_delta is not None) else mid_start_idx,
                 )
             elif need_cond_cache and use_mid_cache and (last_mid_delta is not None):
-                # Step 2+: refresh 8-block DINO conditioning (0..7) at new t_eval while skipping
-                # the 15 middle voxel blocks (8..22) via calibrated Mid-Block Residual DeepCache!
+                # Step 2+: refresh DINO conditioning in block 0 at new t_eval, reconstruct ln_cond_after_7
+                # via Delta-DiT `last_cond_delta`, and skip 22 middle blocks (1..22) to run block 23!
                 v_pos, last_cond7 = self.forward_flow_fast(
                     xt,
                     t_eval,
@@ -923,10 +921,10 @@ class OptimizedLatDitRunner:
                     return_cond_block7=True,
                     cached_mid_delta=last_mid_delta,
                     mid_cache_scale=mid_sc,
-                    custom_mid_start=mid_start_idx,
+                    cached_cond_delta=last_cond_delta,
                 )
             elif need_cond_cache and use_mid_cache:
-                v_pos, last_cond7, last_mid_delta, last_deep_delta = self.forward_flow_fast(
+                v_pos, last_cond7, last_mid_delta, last_cond_delta = self.forward_flow_fast(
                     xt,
                     t_eval,
                     context,
@@ -935,8 +933,7 @@ class OptimizedLatDitRunner:
                     uncond=False,
                     return_cond_block7=True,
                     return_mid_delta=True,
-                    return_deep_delta=True,
-                    custom_mid_start=mid_start_idx,
+                    return_cond_delta=True,
                 )
             elif need_cond_cache:
                 v_pos, last_cond7 = self.forward_flow_fast(
@@ -963,7 +960,6 @@ class OptimizedLatDitRunner:
                             uncond=True,
                             return_mid_delta=True,
                             return_ln_cond7=True,
-                            custom_mid_start=deep_start_idx,
                         )
                     elif use_uncond_mid_cache and last_uncond_mid_delta is not None:
                         v_neg = self.forward_flow_fast(
@@ -975,7 +971,6 @@ class OptimizedLatDitRunner:
                             uncond=True,
                             cached_mid_delta=last_uncond_mid_delta,
                             mid_cache_scale=uncond_mid_sc,
-                            custom_mid_start=deep_start_idx,
                             cached_ln_cond7=last_uncond_ln7,
                         )
                     else:
