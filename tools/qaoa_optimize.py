@@ -726,7 +726,7 @@ class CalibratedTeacherEnsemble:
             + 0.14
         )
         speedup = 88.0 / eff_nfe
-        est_lpips = 0.0012 + 0.145 * (rel_l2 ** 1.75)
+        est_lpips = 0.145 * (rel_l2 ** 1.75)
         quality_lpips = max(0.0, 1.0 - est_lpips) if est_lpips <= 0.25 else 0.0
         public_score = quality_lpips * speedup
         final_log_score = quality_lpips * (1.0 + math.log2(max(1.0, speedup)))

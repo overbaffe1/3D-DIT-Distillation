@@ -116,6 +116,12 @@ class OptimizedLatDitRunner:
         device = self._runtime_device()
         target_dtype = self._compute_dtype(device)
 
+        # Preserve full FP32 precision for the 16x1536 (98 KB) output unpatchify projection
+        # before any BF16 casting so the 16-channel velocity output has zero BF16 mantissa truncation
+        self._unpatchify_w_fp32 = (
+            self.flow.unpatchify.weight.detach().to(device=device, dtype=torch.float32).contiguous()
+        )
+
         if self.solver_config.use_bf16_weights and device.type == "cuda":
             for module in self.core.modules():
                 if isinstance(module, nn.Linear):
@@ -711,9 +717,9 @@ class OptimizedLatDitRunner:
             if can_mid_cache and return_mid_delta and b_idx == (mid_end - 1) and x_mid_in is not None:
                 mid_delta_out = x - x_mid_in
 
-        # Output LayerNorm + Unpatchify
+        # Output LayerNorm + exact FP32 Unpatchify projection (zero BF16 output truncation)
         x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
-        out = F.linear(x, self.flow.unpatchify.weight.to(dtype=x.dtype)).float()
+        out = F.linear(x.float(), self._unpatchify_w_fp32)
 
         if return_cond_block7 and return_mid_delta:
             return out, kv_cc_cache_out, mid_delta_out
