@@ -570,7 +570,9 @@ class OptimizedLatDitRunner:
         raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
         mid_end = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
         can_mid_cache = (0 < mid_start < mid_end)
+        use_freqca_crf = can_mid_cache and (mid_end == num_blocks) and bool(getattr(self.solver_config, "freqca_crf_cache", True))
         x_mid_in: Optional[torch.Tensor] = None
+        x_b0_msa: Optional[torch.Tensor] = None
         cond_mid_in: Optional[torch.Tensor] = None
         mid_delta_out: Optional[torch.Tensor] = None
         cond_delta_out: Optional[torch.Tensor] = None
@@ -580,6 +582,9 @@ class OptimizedLatDitRunner:
                 if cached_mid_delta is not None and mid_start <= b_idx < mid_end:
                     if b_idx == mid_start:
                         x = x + cached_mid_delta * float(mid_cache_scale)
+                        if (not uncond) and use_freqca_crf and x_b0_msa is not None:
+                            # Refresh FreqCa Cumulative Residual Feature (CRF) at Step 2 for Step 3!
+                            self._last_pos_crf_after_b0_msa = x - x_b0_msa
                         if cached_cond_delta is not None and ln_cond_after_7 is None:
                             ln_cond_after_7 = fast_layer_norm(cond + cached_cond_delta)
                         if mid_end == num_blocks:
@@ -589,7 +594,7 @@ class OptimizedLatDitRunner:
                         kv_cc_cache_out.append(None)
                     continue
                 if b_idx == mid_start:
-                    if return_mid_delta:
+                    if return_mid_delta and not (uncond and use_freqca_crf):
                         x_mid_in = x
                     if return_cond_delta:
                         cond_mid_in = cond
@@ -614,6 +619,30 @@ class OptimizedLatDitRunner:
                 if b_idx == 0 and not uncond:
                     self._last_b0_x_after_msa = x
                     self._last_b0_t_val = t_val
+
+            if b_idx == 0 and use_freqca_crf:
+                if uncond:
+                    if cached_mid_delta is not None:
+                        # FreqCa CRF (NeurIPS 2026) + DiTFastAttn: `cached_mid_delta` for uncond already
+                        # spans from `x_after_b0_msa` to `x_after_23` (including Block-0 cross-attn & FFN)!
+                        x = x + cached_mid_delta * float(mid_cache_scale)
+                        break
+                    elif return_mid_delta:
+                        x_mid_in = x
+                else:
+                    if (
+                        cached_cond_block7 is not None
+                        and cached_mid_delta is not None
+                        and getattr(self, "_last_pos_crf_after_b0_msa", None) is not None
+                        and self._last_pos_crf_after_b0_msa.shape == (N, D)
+                        and self._last_pos_crf_after_b0_msa.device == device
+                    ):
+                        # FreqCa CRF (NeurIPS 2026) on fast pos steps (1, 3): apply full cumulative residual
+                        # from `x_after_b0_msa` to `x_after_23` and jump straight to final layer!
+                        x = x + self._last_pos_crf_after_b0_msa * float(mid_cache_scale)
+                        break
+                    else:
+                        x_b0_msa = x
 
             # --- 2. Conditioning Self-Attention + Cross-Attention ---
             if block.cond:
@@ -812,6 +841,8 @@ class OptimizedLatDitRunner:
 
             if can_mid_cache and b_idx == (mid_end - 1) and return_mid_delta and x_mid_in is not None:
                 mid_delta_out = x - x_mid_in
+                if (not uncond) and use_freqca_crf and x_b0_msa is not None:
+                    self._last_pos_crf_after_b0_msa = x - x_b0_msa
 
         # Output LayerNorm + exact FP32 Unpatchify projection (zero BF16 output truncation)
         x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])

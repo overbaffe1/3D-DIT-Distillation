@@ -3119,5 +3119,6 @@
   "cfg_zero_star_projection": true,
   "foca_dead_branch_elim": true,
   "ditfastattn_b0_msa_share": true,
-  "pab_cross_attn_broadcast": true
+  "pab_cross_attn_broadcast": true,
+  "freqca_crf_cache": true
 }
