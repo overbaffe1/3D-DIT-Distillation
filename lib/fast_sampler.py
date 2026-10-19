@@ -45,6 +45,8 @@ class SolverConfig:
     freqca_crf_cache: bool = True
     dbcache_foca_subblock_crf: bool = True
     foca_fn_heun_gamma: float = 0.12
+    hetcache_b0_cond_msa_reuse: bool = True
+    autotarget_clean_endpoint_blend: float = 0.08
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

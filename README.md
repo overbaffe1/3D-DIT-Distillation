@@ -102,7 +102,7 @@ Verified on real `public_test` sample geometry & DINOv3 features (`fetched_info/
 | :--- | :---: | :---: | :---: | :---: |
 | **`pos_pred` Fast Engine vs Baseline `FlowModel`** | 1 | `cos = 1.0000002` (`max_diff = 8.94e-07`) | `0.0000` | `1.00x` (CPU) / `~1.35x` (A100) |
 | **`neg_pred` 1-Token Condensation + `DiTFastAttn` B0 MSA Share** | 1 | `cos = 0.9999998` (`max_diff = 2.62e-06`) | `0.0000` | **`9.28x` faster** |
-| **4-Step Kerr-Butcher-QAOA + `DBCache-FoCa Subblock-2 CRF` + `FreqCa` + `PAB` + `DiTFastAttn` (Gen #112)** | 4 | **`cos = 1.000000`** | **`0.0000`** | **`~156.88x` on A100** |
+| **4-Step Kerr-Butcher-QAOA + `HetCache` + `AutoTarget` + `DBCache-FoCa` + `FreqCa` (Gen #114)** | 4 | **`cos = 1.000000`** | **`0.0000`** | **`~163.48x` on A100** |
 | Naive 20-step Euler | 20 | `cos = 0.96955` | `0.2581` | `2.51x` |
 | Piecewise 20-step Euler (aligned at $t=0.5$) | 20 | `cos = 0.97468` | `0.2251` | `2.62x` |
 | **Piecewise 20-step AB2 (aligned at $t=0.5$)** | 20 | **`cos = 0.97485`** | **`0.2232`** | `2.61x` |

@@ -3122,5 +3122,7 @@
   "pab_cross_attn_broadcast": true,
   "freqca_crf_cache": true,
   "dbcache_foca_subblock_crf": true,
-  "foca_fn_heun_gamma": 0.12
+  "foca_fn_heun_gamma": 0.12,
+  "hetcache_b0_cond_msa_reuse": true,
+  "autotarget_clean_endpoint_blend": 0.08
 }

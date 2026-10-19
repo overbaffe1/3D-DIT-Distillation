@@ -168,6 +168,20 @@ class OptimizedLatDitRunner:
                 block._cond_to_v_b = (
                     block.cond_to_qkv.bias[2 * D :].contiguous() if block.cond_to_qkv.bias is not None else None
                 )
+                # In cond_to_qkv_cross ([3*D, D]), slice [D:3*D] is K_cc, V_cc only (used when skip_cond_out=True!)
+                block._cond_to_kv_cross_slice_w = block.cond_to_qkv_cross.weight[D:, :].contiguous()
+                block._cond_to_kv_cross_slice_b = (
+                    block.cond_to_qkv_cross.bias[D:].contiguous()
+                    if block.cond_to_qkv_cross.bias is not None
+                    else None
+                )
+                # And slice [2*D:3*D] is V_cc only (used when use_1tok_uncond=True and skip_cond_out=True!)
+                block._cond_to_v_cross_slice_w = block.cond_to_qkv_cross.weight[2 * D :, :].contiguous()
+                block._cond_to_v_cross_slice_b = (
+                    block.cond_to_qkv_cross.bias[2 * D :].contiguous()
+                    if block.cond_to_qkv_cross.bias is not None
+                    else None
+                )
             else:
                 # In cond_to_kv_cross ([2*D, D]), slice [D:2*D] is V only
                 block._cond_to_v_cross_w = block.cond_to_kv_cross.weight[D:, :].contiguous()
@@ -547,8 +561,32 @@ class OptimizedLatDitRunner:
             and self._last_b0_x_after_msa.shape == (N, D)
             and self._last_b0_x_after_msa.device == device
         )
+        num_blocks = len(self.flow.blocks)
+        mid_start = int(getattr(self.solver_config, "mid_block_start", 1))
+        raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
+        mid_end = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
+        can_mid_cache = (0 < mid_start < mid_end)
+        use_freqca_crf = can_mid_cache and (mid_end == num_blocks) and bool(getattr(self.solver_config, "freqca_crf_cache", True))
+        use_subblock_crf = use_freqca_crf and bool(getattr(self.solver_config, "dbcache_foca_subblock_crf", True))
+        use_hetcache_b0 = bool(getattr(self.solver_config, "hetcache_b0_cond_msa_reuse", True))
+        foca_gamma = float(getattr(self.solver_config, "foca_fn_heun_gamma", 0.12))
+
         if reuse_b0_msa:
             x = self._last_b0_x_after_msa
+            if (
+                uncond
+                and use_freqca_crf
+                and cached_mid_delta is not None
+                and not return_cond_block7
+                and not return_mid_delta
+                and not return_cond_delta
+                and not return_ln_cond7
+            ):
+                # Fast Uncond CRF Short-Circuit (FreqCa + DiTFastAttn + RA-CFGCache):
+                # Directly fuse shared Block-0 MSA output with uncond CRF and project to FP32 velocity!
+                x = x + cached_mid_delta * float(mid_cache_scale)
+                x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
+                return F.linear(x.float(), self._unpatchify_w_fp32)
         else:
             # Patchify (for patch_size=1 on pre-sorted coords, this is a single linear projection)
             x = F.linear(xt_sorted.to(dtype=compute_dtype), self.flow.patchify.weight.to(dtype=compute_dtype))
@@ -565,14 +603,6 @@ class OptimizedLatDitRunner:
         kv_cc_cache_out: Optional[List[torch.Tensor]] = [] if return_cond_block7 else None
         use_triton = self.solver_config.use_fused_triton_kernels
 
-        num_blocks = len(self.flow.blocks)
-        mid_start = int(getattr(self.solver_config, "mid_block_start", 1))
-        raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
-        mid_end = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
-        can_mid_cache = (0 < mid_start < mid_end)
-        use_freqca_crf = can_mid_cache and (mid_end == num_blocks) and bool(getattr(self.solver_config, "freqca_crf_cache", True))
-        use_subblock_crf = use_freqca_crf and bool(getattr(self.solver_config, "dbcache_foca_subblock_crf", True))
-        foca_gamma = float(getattr(self.solver_config, "foca_fn_heun_gamma", 0.12))
         x_patchify = x
         x_mid_in: Optional[torch.Tensor] = None
         x_b0_msa: Optional[torch.Tensor] = None
@@ -686,7 +716,14 @@ class OptimizedLatDitRunner:
                     # Exact 1-token cross-attention:
                     # x -> cond output is identically v_cond_cross for all N voxels!
                     h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
-                    q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
+                    if skip_cond_out:
+                        vc_w = getattr(block, "_cond_to_v_cross_slice_w", None)
+                        if vc_w is not None:
+                            v_cc = F.linear(h_cond_cr, vc_w, getattr(block, "_cond_to_v_cross_slice_b", None)).view(1, D)
+                        else:
+                            v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, D)[:, 2]
+                    else:
+                        q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
                     h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
 
                     if not skip_cond_out:
@@ -740,20 +777,47 @@ class OptimizedLatDitRunner:
                         x = fast_gate_add(x, cr_proj_out, sizes, g_cr)
                 else:
                     L = cond.shape[1]
-                    h_cond = fast_modulate_cond(cond, cs_msa, csh_msa)
-                    qkv_cond = block.cond_to_qkv(h_cond).view(batch_size, L, 3, H, HD)
-                    cq_scale = getattr(block.cond_qk_norm, "_q_scale_cast", block.cond_qk_norm.q_scale)
-                    ck_scale = getattr(block.cond_qk_norm, "_k_scale_cast", block.cond_qk_norm.k_scale)
-                    qkv_cond = fused_qknorm_rope2d_cond_inplace(
-                        qkv_cond, cq_scale, ck_scale, cos_cond_2d, sin_cond_2d, use_triton=use_triton
-                    )
-                    h_cond = flash_cond_self_attn(qkv_cond)
-                    cond = cond + block.cond_to_out(h_cond.reshape(batch_size, L, D)) * cg_msa[:, None]
+                    if (
+                        b_idx == 0
+                        and (not uncond)
+                        and skip_cond_out
+                        and use_hetcache_b0
+                        and getattr(self, "_last_b0_cond_msa_out", None) is not None
+                        and self._last_b0_cond_msa_out.shape == (batch_size, L, D)
+                        and self._last_b0_cond_msa_out.device == device
+                    ):
+                        # HetCache (arXiv:2603.24260, 2026): static DINO context tokens in Block 0
+                        # reuse their O(L^2) self-attention output projection modulated by current `cg_msa(t)`!
+                        cond = cond + self._last_b0_cond_msa_out * cg_msa[:, None]
+                    else:
+                        h_cond = fast_modulate_cond(cond, cs_msa, csh_msa)
+                        qkv_cond = block.cond_to_qkv(h_cond).view(batch_size, L, 3, H, HD)
+                        cq_scale = getattr(block.cond_qk_norm, "_q_scale_cast", block.cond_qk_norm.q_scale)
+                        ck_scale = getattr(block.cond_qk_norm, "_k_scale_cast", block.cond_qk_norm.k_scale)
+                        qkv_cond = fused_qknorm_rope2d_cond_inplace(
+                            qkv_cond, cq_scale, ck_scale, cos_cond_2d, sin_cond_2d, use_triton=use_triton
+                        )
+                        h_cond = flash_cond_self_attn(qkv_cond)
+                        cond_msa_proj = block.cond_to_out(h_cond.reshape(batch_size, L, D))
+                        if b_idx == 0 and not uncond:
+                            self._last_b0_cond_msa_out = cond_msa_proj
+                        cond = cond + cond_msa_proj * cg_msa[:, None]
 
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                     h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
-                    qkv_cc_cr = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)
-                    kv_cc = qkv_cc_cr[:, 1:]
+                    if skip_cond_out:
+                        # Exact Cross-KV Slice: when skip_cond_out=True, Q_cc ([L, D]) is never used!
+                        # Compute only K_cc, V_cc ([L, 2*D]), cutting 33.3% of DINO cross-QKV GEMM FLOPs!
+                        kvc_w = getattr(block, "_cond_to_kv_cross_slice_w", None)
+                        if kvc_w is not None:
+                            kv_cc = F.linear(
+                                h_cond_cr, kvc_w, getattr(block, "_cond_to_kv_cross_slice_b", None)
+                            ).view(batch_size * L, 2, H, HD)
+                        else:
+                            kv_cc = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)[:, 1:]
+                    else:
+                        qkv_cc_cr = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)
+                        kv_cc = qkv_cc_cr[:, 1:]
                     if kv_cc_cache_out is not None:
                         kv_cc_cache_out.append(kv_cc)
 
@@ -1034,10 +1098,13 @@ class OptimizedLatDitRunner:
 
         self._last_b0_x_after_msa = None
         self._last_b0_cr_proj = None
+        self._last_b0_cond_msa_out = None
         self._last_pos_crf_after_b0_msa = None
         self._last_pos_crf_after_b0_cr = None
         self._last_b0_fn_res = None
         self._last_b0_fn_res_step0 = None
+        last_neg_x0: Optional[torch.Tensor] = None
+        at_blend = float(getattr(self.solver_config, "autotarget_clean_endpoint_blend", 0.08))
 
         for step_idx in range(total_steps):
             t_val = float(t_list[step_idx])
@@ -1149,6 +1216,8 @@ class OptimizedLatDitRunner:
                         prev_delta = last_delta
                     last_delta = cur_delta
                     last_neg = v_neg
+                    if at_blend > 0.0:
+                        last_neg_x0 = xt - t_eval * v_neg
                 else:
                     if cfg_mode == "neg_reuse" and last_neg is not None:
                         neg_fd_vecs = qt.get("neg_fd_vecs", [])
@@ -1162,11 +1231,15 @@ class OptimizedLatDitRunner:
                             cur_delta = v_pos - neg_est
                             last_neg = neg_est
                         elif bool(getattr(self.solver_config, "cfg_zero_star_projection", True)):
-                            # CFG-Zero* (arXiv:2503.18886): optimal scalar projection s* = <v_pos, v_neg> / ||v_neg||^2
-                            dot_pn = (v_pos * last_neg).sum()
-                            norm_nn = (last_neg * last_neg).sum().clamp_min(1e-6)
+                            # AutoTarget Clean-Endpoint Reparameterization (arXiv:2610.03577) + CFG-Zero* (arXiv:2503.18886)
+                            neg_cand = last_neg
+                            if at_blend > 0.0 and last_neg_x0 is not None and t_eval > 0.25:
+                                v_neg_ep = (xt - last_neg_x0) * (1.0 / t_eval)
+                                neg_cand = (1.0 - at_blend) * last_neg + at_blend * v_neg_ep
+                            dot_pn = (v_pos * neg_cand).sum()
+                            norm_nn = (neg_cand * neg_cand).sum().clamp_min(1e-6)
                             s_star = (dot_pn / norm_nn).clamp(0.90, 1.10)
-                            cur_delta = v_pos - s_star * last_neg
+                            cur_delta = v_pos - s_star * neg_cand
                         else:
                             cur_delta = v_pos - last_neg
                     elif cfg_mode == "delta_extrapolate" and prev_delta is not None:
