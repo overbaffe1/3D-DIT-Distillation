@@ -469,6 +469,21 @@ def fast_gate(x: torch.Tensor, sizes: List[int], scale: torch.Tensor) -> torch.T
     return torch.cat([hh * scale[idx].type_as(hh) for idx, hh in enumerate(x.split(sizes))], dim=0)
 
 
+def fast_gate_add(
+    residual: torch.Tensor,
+    h: torch.Tensor,
+    sizes: List[int],
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    """Fused residual + h * gate using single-kernel torch.addcmul when batch_size == 1."""
+    if len(sizes) == 1:
+        g = scale.view(1, -1)
+        if g.dtype != h.dtype:
+            g = g.to(dtype=h.dtype)
+        return torch.addcmul(residual, h, g)
+    return residual + fast_gate(h, sizes, scale)
+
+
 def fast_rms_norm(
     x: torch.Tensor,
     weight: Optional[torch.Tensor] = None,
@@ -720,6 +735,148 @@ if HAS_TRITON:
         tl.store(out_v_base + 3 * Q + offs, tl.load(v_base + 3 * Q + offs))
         tl.store(out_v_base + 4 * Q + offs, tl.load(v_base + 4 * Q + offs))
         tl.store(out_v_base + 5 * Q + offs, tl.load(v_base + 5 * Q + offs))
+
+    @triton.jit
+    def _fused_qknorm_rope2d_cond_inplace_kernel(
+        qkv_ptr,
+        q_scale_ptr,
+        k_scale_ptr,
+        cos2d_ptr,
+        sin2d_ptr,
+        L,
+        H: tl.constexpr,
+        prefix_tokens: tl.constexpr,
+        eps: tl.constexpr,
+    ):
+        """
+        In-place QKNorm + 2D RoPE on `qkv_cond` [1, L, 3, H, 96]:
+          - For all l in [0, L): applies RMSNorm(q) * q_scale and RMSNorm(k) * k_scale
+          - For l >= prefix_tokens (5): applies 2D RoPE rotation (Q=24) in registers
+          - Leaves V (idx 2) untouched in-place (zero memory allocations!)
+        """
+        l_idx = tl.program_id(0)
+        h = tl.program_id(1)
+
+        offs = tl.arange(0, 32)
+        mask = offs < 24
+        Q: tl.constexpr = 24
+        D: tl.constexpr = 96
+        stride_l = 3 * H * D
+        stride_3 = H * D
+        stride_h = D
+
+        # --- Q (idx 0) ---
+        q_base = qkv_ptr + l_idx * stride_l + 0 * stride_3 + h * stride_h
+        qs_base = q_scale_ptr + h * D
+
+        qu0 = tl.load(q_base + 0 * Q + offs, mask=mask, other=0.0)
+        qv0 = tl.load(q_base + 1 * Q + offs, mask=mask, other=0.0)
+        qu1 = tl.load(q_base + 2 * Q + offs, mask=mask, other=0.0)
+        qv1 = tl.load(q_base + 3 * Q + offs, mask=mask, other=0.0)
+
+        qu0_f, qv0_f = qu0.to(tl.float32), qv0.to(tl.float32)
+        qu1_f, qv1_f = qu1.to(tl.float32), qv1.to(tl.float32)
+        q_sq = tl.sum(qu0_f * qu0_f + qv0_f * qv0_f + qu1_f * qu1_f + qv1_f * qv1_f, axis=0)
+        q_rrms = tl.rsqrt(q_sq * (1.0 / 96.0) + eps)
+
+        qsu0 = tl.load(qs_base + 0 * Q + offs, mask=mask, other=0.0).to(qu0.dtype).to(tl.float32)
+        qsv0 = tl.load(qs_base + 1 * Q + offs, mask=mask, other=0.0).to(qu0.dtype).to(tl.float32)
+        qsu1 = tl.load(qs_base + 2 * Q + offs, mask=mask, other=0.0).to(qu0.dtype).to(tl.float32)
+        qsv1 = tl.load(qs_base + 3 * Q + offs, mask=mask, other=0.0).to(qu0.dtype).to(tl.float32)
+
+        qu0_n = (qu0_f * q_rrms).to(qu0.dtype).to(tl.float32) * qsu0
+        qv0_n = (qv0_f * q_rrms).to(qu0.dtype).to(tl.float32) * qsv0
+        qu1_n = (qu1_f * q_rrms).to(qu0.dtype).to(tl.float32) * qsu1
+        qv1_n = (qv1_f * q_rrms).to(qu0.dtype).to(tl.float32) * qsv1
+
+        # --- K (idx 1) ---
+        k_base = qkv_ptr + l_idx * stride_l + 1 * stride_3 + h * stride_h
+        ks_base = k_scale_ptr + h * D
+
+        ku0 = tl.load(k_base + 0 * Q + offs, mask=mask, other=0.0)
+        kv0 = tl.load(k_base + 1 * Q + offs, mask=mask, other=0.0)
+        ku1 = tl.load(k_base + 2 * Q + offs, mask=mask, other=0.0)
+        kv1 = tl.load(k_base + 3 * Q + offs, mask=mask, other=0.0)
+
+        ku0_f, kv0_f = ku0.to(tl.float32), kv0.to(tl.float32)
+        ku1_f, kv1_f = ku1.to(tl.float32), kv1.to(tl.float32)
+        k_sq = tl.sum(ku0_f * ku0_f + kv0_f * kv0_f + ku1_f * ku1_f + kv1_f * kv1_f, axis=0)
+        k_rrms = tl.rsqrt(k_sq * (1.0 / 96.0) + eps)
+
+        ksu0 = tl.load(ks_base + 0 * Q + offs, mask=mask, other=0.0).to(ku0.dtype).to(tl.float32)
+        ksv0 = tl.load(ks_base + 1 * Q + offs, mask=mask, other=0.0).to(ku0.dtype).to(tl.float32)
+        ksu1 = tl.load(ks_base + 2 * Q + offs, mask=mask, other=0.0).to(ku0.dtype).to(tl.float32)
+        ksv1 = tl.load(ks_base + 3 * Q + offs, mask=mask, other=0.0).to(ku0.dtype).to(tl.float32)
+
+        ku0_n = (ku0_f * k_rrms).to(ku0.dtype).to(tl.float32) * ksu0
+        kv0_n = (kv0_f * k_rrms).to(ku0.dtype).to(tl.float32) * ksv0
+        ku1_n = (ku1_f * k_rrms).to(ku0.dtype).to(tl.float32) * ksu1
+        kv1_n = (kv1_f * k_rrms).to(ku0.dtype).to(tl.float32) * ksv1
+
+        if l_idx >= prefix_tokens:
+            sp_idx = l_idx - prefix_tokens
+            c_base = cos2d_ptr + sp_idx * (2 * Q)
+            s_base = sin2d_ptr + sp_idx * (2 * Q)
+            c0 = tl.load(c_base + 0 * Q + offs, mask=mask, other=1.0).to(tl.float32)
+            c1 = tl.load(c_base + 1 * Q + offs, mask=mask, other=1.0).to(tl.float32)
+            s0 = tl.load(s_base + 0 * Q + offs, mask=mask, other=0.0).to(tl.float32)
+            s1 = tl.load(s_base + 1 * Q + offs, mask=mask, other=0.0).to(tl.float32)
+
+            tl.store(q_base + 0 * Q + offs, (qu0_n * c0 - qv0_n * s0).to(qu0.dtype), mask=mask)
+            tl.store(q_base + 1 * Q + offs, (qv0_n * c0 + qu0_n * s0).to(qu0.dtype), mask=mask)
+            tl.store(q_base + 2 * Q + offs, (qu1_n * c1 - qv1_n * s1).to(qu0.dtype), mask=mask)
+            tl.store(q_base + 3 * Q + offs, (qv1_n * c1 + qu1_n * s1).to(qu0.dtype), mask=mask)
+
+            tl.store(k_base + 0 * Q + offs, (ku0_n * c0 - kv0_n * s0).to(ku0.dtype), mask=mask)
+            tl.store(k_base + 1 * Q + offs, (kv0_n * c0 + ku0_n * s0).to(ku0.dtype), mask=mask)
+            tl.store(k_base + 2 * Q + offs, (ku1_n * c1 - kv1_n * s1).to(ku0.dtype), mask=mask)
+            tl.store(k_base + 3 * Q + offs, (kv1_n * c1 + ku1_n * s1).to(ku0.dtype), mask=mask)
+        else:
+            tl.store(q_base + 0 * Q + offs, qu0_n.to(qu0.dtype), mask=mask)
+            tl.store(q_base + 1 * Q + offs, qv0_n.to(qu0.dtype), mask=mask)
+            tl.store(q_base + 2 * Q + offs, qu1_n.to(qu0.dtype), mask=mask)
+            tl.store(q_base + 3 * Q + offs, qv1_n.to(qu0.dtype), mask=mask)
+
+            tl.store(k_base + 0 * Q + offs, ku0_n.to(ku0.dtype), mask=mask)
+            tl.store(k_base + 1 * Q + offs, kv0_n.to(ku0.dtype), mask=mask)
+            tl.store(k_base + 2 * Q + offs, ku1_n.to(ku0.dtype), mask=mask)
+            tl.store(k_base + 3 * Q + offs, kv1_n.to(ku0.dtype), mask=mask)
+
+
+def fused_qknorm_rope2d_cond_inplace(
+    qkv_cond: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    cos_cond_2d: torch.Tensor,
+    sin_cond_2d: torch.Tensor,
+    use_triton: bool = True,
+) -> torch.Tensor:
+    """
+    Apply QK RMSNorm + 2D RoPE on `qkv_cond` [B, L, 3, H, 96].
+    On GPU with Triton and B==1, executes in-place in a single kernel with zero allocations!
+    """
+    B, L, _, H, D = qkv_cond.shape
+    if use_triton and HAS_TRITON and qkv_cond.is_cuda and B == 1 and D == 96:
+        _fused_qknorm_rope2d_cond_inplace_kernel[(L, H)](
+            qkv_cond,
+            q_scale,
+            k_scale,
+            cos_cond_2d,
+            sin_cond_2d,
+            L=L,
+            H=H,
+            prefix_tokens=5,
+            eps=1e-6,
+            num_warps=1,
+        )
+        return qkv_cond
+
+    q_c, k_c, v_c = qkv_cond.unbind(dim=-3)
+    q_c = fast_rms_norm(q_c) * q_scale.to(q_c.dtype)
+    k_c = fast_rms_norm(k_c) * k_scale.to(k_c.dtype)
+    q_c = torch.cat([q_c[:, :5], apply_rope_cached_2d(q_c[:, 5:], cos_cond_2d, sin_cond_2d)], dim=1)
+    k_c = torch.cat([k_c[:, :5], apply_rope_cached_2d(k_c[:, 5:], cos_cond_2d, sin_cond_2d)], dim=1)
+    return torch.stack([q_c, k_c, v_c], dim=-3)
 
 
 def fused_qknorm_rope3d_gather(

@@ -4,13 +4,13 @@
     "pos_cosine_sim": 1.000000238418579,
     "neg_1token_max_abs_diff": 2.7418136596679688e-06,
     "neg_1token_cosine_sim": 0.9999998807907104,
-    "ref_pos_sec": 3.253859129999995,
-    "fast_pos_sec": 3.229094236999998,
-    "ref_neg_sec": 3.254847254999987,
-    "fast_neg_1token_sec": 0.42034188899998526,
-    "neg_speedup": 7.743333082371197
+    "ref_pos_sec": 3.2868753659999754,
+    "fast_pos_sec": 3.309528011999987,
+    "ref_neg_sec": 3.2832554119999884,
+    "fast_neg_1token_sec": 0.421085287999972,
+    "neg_speedup": 7.79712686613788
   },
-  "teacher_time_sec": 16.570723205000007,
+  "teacher_time_sec": 16.892852221999988,
   "solvers": {
     "euler_20_naive": {
       "steps": 20,
@@ -20,8 +20,8 @@
       "rel_l2": 0.2580939829349518,
       "cosine_sim": 0.9695526957511902,
       "mae": 0.6151383519172668,
-      "time_sec": 6.733697978000009,
-      "speedup_vs_teacher": 2.460865227270219
+      "time_sec": 6.726305808000006,
+      "speedup_vs_teacher": 2.511460629980321
     },
     "piecewise_euler_20_exact": {
       "steps": 20,
@@ -31,63 +31,63 @@
       "rel_l2": 0.2251259833574295,
       "cosine_sim": 0.9746792316436768,
       "mae": 0.5809175372123718,
-      "time_sec": 6.362078942000011,
-      "speedup_vs_teacher": 2.6046082351488025
+      "time_sec": 6.437186768999993,
+      "speedup_vs_teacher": 2.6242600732593417
     },
     "piecewise_ab2_20_exact": {
       "steps": 20,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 1,
       "cfg_cache_mode": "exact",
-      "rel_l2": 0.22256362438201904,
-      "cosine_sim": 0.9750274419784546,
-      "mae": 0.5730032920837402,
-      "time_sec": 6.396387711000017,
-      "speedup_vs_teacher": 2.590637708921701
+      "rel_l2": 0.22317035496234894,
+      "cosine_sim": 0.9748481512069702,
+      "mae": 0.5739932060241699,
+      "time_sec": 6.4649477090000005,
+      "speedup_vs_teacher": 2.612991315998282
     },
     "piecewise_ab2_16_stride2_reuse": {
       "steps": 16,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_reuse",
-      "rel_l2": 0.39342600107192993,
-      "cosine_sim": 0.9194909930229187,
-      "mae": 1.036490559577942,
-      "time_sec": 4.441453530999979,
-      "speedup_vs_teacher": 3.7309234666852773
+      "rel_l2": 0.390213280916214,
+      "cosine_sim": 0.9207513332366943,
+      "mae": 1.0221508741378784,
+      "time_sec": 4.494155551000006,
+      "speedup_vs_teacher": 3.758849027430997
     },
     "piecewise_ab2_16_stride2_extrap": {
       "steps": 16,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.3540138900279999,
-      "cosine_sim": 0.9352406859397888,
-      "mae": 0.8858368396759033,
-      "time_sec": 4.312192874000004,
-      "speedup_vs_teacher": 3.8427602125386726
+      "rel_l2": 0.3498031795024872,
+      "cosine_sim": 0.9368564486503601,
+      "mae": 0.8686280250549316,
+      "time_sec": 4.495412950000002,
+      "speedup_vs_teacher": 3.7577976506029285
     },
     "piecewise_ab2_14_stride2_extrap": {
       "steps": 14,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.3507664203643799,
-      "cosine_sim": 0.9379522800445557,
-      "mae": 0.8507900238037109,
-      "time_sec": 3.787050085000004,
-      "speedup_vs_teacher": 4.375628215384426
+      "rel_l2": 0.36186543107032776,
+      "cosine_sim": 0.9335999488830566,
+      "mae": 0.8811272382736206,
+      "time_sec": 3.8124061070000153,
+      "speedup_vs_teacher": 4.431021183966412
     },
     "piecewise_ab2_12_stride2_extrap": {
       "steps": 12,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.3553158938884735,
-      "cosine_sim": 0.9368600249290466,
-      "mae": 0.8680980205535889,
-      "time_sec": 3.30039001199998,
-      "speedup_vs_teacher": 5.0208378842349095
+      "rel_l2": 0.35748007893562317,
+      "cosine_sim": 0.9357241988182068,
+      "mae": 0.8640261292457581,
+      "time_sec": 3.383145376000016,
+      "speedup_vs_teacher": 4.993238641720109
     }
   }
 }

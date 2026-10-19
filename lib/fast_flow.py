@@ -20,6 +20,7 @@ from lib.fast_kernels import (
     apply_rope_cached_2d,
     build_conv_indices_fast,
     fast_gate,
+    fast_gate_add,
     fast_layer_norm,
     fast_modulate,
     fast_modulate_cond,
@@ -29,6 +30,7 @@ from lib.fast_kernels import (
     flash_cond_self_attn,
     flash_cross_attn,
     flash_varlen_qkvpacked_already_sorted,
+    fused_qknorm_rope2d_cond_inplace,
     fused_qknorm_rope3d_gather,
     lookup_rope_3d,
     precompute_rope_2d_cond,
@@ -412,7 +414,7 @@ class OptimizedLatDitRunner:
             )
             attn_out = flash_varlen_qkvpacked_already_sorted(qkv_sorted, bwd_idx, cu_seqlens, max_len)
             h = block.to_out(attn_out.reshape(N, D))
-            x = x + fast_gate(h, sizes, g_msa)
+            x = fast_gate_add(x, h, sizes, g_msa)
 
             # --- 2. Conditioning Self-Attention + Cross-Attention ---
             if block.cond:
@@ -442,7 +444,7 @@ class OptimizedLatDitRunner:
                     q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
 
                     h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
-                    x = x + fast_gate(h_x_cross, sizes, g_cr)
+                    x = fast_gate_add(x, h_x_cross, sizes, g_cr)
 
                     h_c_cross = flash_cross_attn(
                         q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seqlens, q_maxlen
@@ -466,19 +468,16 @@ class OptimizedLatDitRunner:
                     h_x_out = flash_cross_attn(
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
                     )
-                    x = x + fast_gate(block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                    x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
                 else:
                     L = cond.shape[1]
                     h_cond = fast_modulate_cond(cond, cs_msa, csh_msa)
                     qkv_cond = block.cond_to_qkv(h_cond).view(batch_size, L, 3, H, HD)
-                    q_c, k_c, v_c = qkv_cond.unbind(dim=-3)
                     cq_scale = getattr(block.cond_qk_norm, "_q_scale_cast", block.cond_qk_norm.q_scale)
                     ck_scale = getattr(block.cond_qk_norm, "_k_scale_cast", block.cond_qk_norm.k_scale)
-                    q_c = fast_rms_norm(q_c) * cq_scale.to(q_c.dtype)
-                    k_c = fast_rms_norm(k_c) * ck_scale.to(k_c.dtype)
-                    q_c = torch.cat([q_c[:, :5], apply_rope_cached_2d(q_c[:, 5:], cos_cond_2d, sin_cond_2d)], dim=1)
-                    k_c = torch.cat([k_c[:, :5], apply_rope_cached_2d(k_c[:, 5:], cos_cond_2d, sin_cond_2d)], dim=1)
-                    qkv_cond = torch.stack([q_c, k_c, v_c], dim=-3)
+                    qkv_cond = fused_qknorm_rope2d_cond_inplace(
+                        qkv_cond, cq_scale, ck_scale, cos_cond_2d, sin_cond_2d, use_triton=use_triton
+                    )
                     h_cond = flash_cond_self_attn(qkv_cond)
                     cond = cond + block.cond_to_out(h_cond.reshape(batch_size, L, D)) * cg_msa[:, None]
 
@@ -499,7 +498,7 @@ class OptimizedLatDitRunner:
                         kv_seqlens_full,
                         kv_maxlen_full,
                     )
-                    x = x + fast_gate(block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                    x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
 
                     h_c_out = flash_cross_attn(
                         qkv_cc_cr[:, 0],
@@ -530,7 +529,7 @@ class OptimizedLatDitRunner:
                         v_cc = F.linear(h_cond_cr, v_w, getattr(block, "_cond_to_v_cross_b", None)).view(1, D)
                     else:
                         v_cc = block.cond_to_kv_cross(h_cond_cr).view(1, 2, D)[:, 1]
-                    x = x + fast_gate(block.to_out_cross(v_cc), sizes, g_cr)
+                    x = fast_gate_add(x, block.to_out_cross(v_cc), sizes, g_cr)
                 elif cached_cond_block7 is not None:
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
@@ -538,7 +537,7 @@ class OptimizedLatDitRunner:
                     h_x_out = flash_cross_attn(
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
                     )
-                    x = x + fast_gate(block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                    x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
                 else:
                     L = cond.shape[1]
                     h_cond_cr = ln_cond_after_7 * (1.0 + cs_cr[:, None]) + csh_cr[:, None]
@@ -550,7 +549,7 @@ class OptimizedLatDitRunner:
                     h_x_out = flash_cross_attn(
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
                     )
-                    x = x + fast_gate(block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
+                    x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
 
             # --- 3. Main FFN + 3D Submanifold Sparse Conv + SwiGLU ---
             h_mlp = fast_modulate(x, sizes, s_mlp, sh_mlp)
@@ -561,7 +560,7 @@ class OptimizedLatDitRunner:
                 h_mlp = fast_sparse_conv3d(h_mlp, w_fp32, b_fp32, conv_indices)
             h1, h_gate = h_mlp.chunk(2, dim=-1)
             h_mlp = block.ffn1(fast_swiglu(h_gate, h1))
-            x = x + fast_gate(h_mlp, sizes, g_mlp)
+            x = fast_gate_add(x, h_mlp, sizes, g_mlp)
 
         # Output LayerNorm + Unpatchify
         x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
@@ -585,7 +584,7 @@ class OptimizedLatDitRunner:
                 guidance_scale=7.0,
                 cfg_range=(0.5, 1.0),
                 rescale_t=3.0,
-                num_inference_steps=2,
+                num_inference_steps=50,
             )
             self.sample_fast(dummy_vox, dummy_cond, sampling=dummy_sampling)
             torch.cuda.synchronize(device)
