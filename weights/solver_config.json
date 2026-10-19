@@ -1,17 +1,96 @@
 {
-  "num_inference_steps": 5,
-  "n_guided_steps": 4,
+  "num_inference_steps": 4,
+  "n_guided_steps": 3,
   "n_unguided_steps": 1,
   "guidance_scale": 7.0,
-  "cfg_range": [0.5, 1.0],
+  "cfg_range": [
+    0.5,
+    1.0
+  ],
   "rescale_t": 3.0,
-  "solver_type": "piecewise_euler",
+  "solver_type": "piecewise_qaoa",
   "ab2_max_ratio": 0.35,
   "cfg_stride": 2,
   "cfg_cache_mode": "neg_reuse",
   "cfg_extrapolation_alpha": 0.35,
   "uncond_1token_condensation": true,
   "cache_cond_block7_stride": 2,
+  "eval_cond_steps": [
+    0,
+    2
+  ],
+  "eval_uncond_steps": [
+    0,
+    2
+  ],
+  "qaoa_enabled": true,
+  "qaoa_t_nodes": [
+    1.0,
+    0.829849,
+    0.646666,
+    0.5,
+    0.0
+  ],
+  "qaoa_t_eval_shifts": [
+    0.025,
+    0.025,
+    0.025,
+    0.025
+  ],
+  "qaoa_dt_scales": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "qaoa_cfg_scales": [
+    0.949991,
+    0.949991,
+    1.120477,
+    0.0
+  ],
+  "qaoa_momentum": [
+    0.0,
+    0.035,
+    0.035,
+    0.0
+  ],
+  "qaoa_channel_scale": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "qaoa_channel_bias": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
   "precompute_static_geometry": true,
   "precompute_rope_tables": true,
   "precompute_time_gates": true,

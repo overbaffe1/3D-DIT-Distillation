@@ -1,4 +1,4 @@
-"""Piecewise Flow-Matching ODE Solvers and Adaptive CFG Caching for LatDiT."""
+"""Piecewise Flow-Matching ODE Solvers, QAOA Variational Circuit Parameters, and Adaptive CFG Caching."""
 
 from __future__ import annotations
 
@@ -6,26 +6,37 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
 
 @dataclass
 class SolverConfig:
-    num_inference_steps: int = 5
-    n_guided_steps: int = 4
+    num_inference_steps: int = 4
+    n_guided_steps: int = 3
     n_unguided_steps: int = 1
     guidance_scale: float = 7.0
     cfg_range: Tuple[float, float] = (0.5, 1.0)
     rescale_t: float = 3.0
-    solver_type: str = "piecewise_euler"  # "euler" | "piecewise_euler" | "piecewise_ab2"
+    solver_type: str = "piecewise_qaoa"  # "euler" | "piecewise_euler" | "piecewise_ab2" | "piecewise_qaoa"
     ab2_max_ratio: float = 0.35
     cfg_stride: int = 2
     cfg_cache_mode: str = "neg_reuse"  # "exact" | "delta_reuse" | "delta_extrapolate" | "neg_reuse"
     cfg_extrapolation_alpha: float = 0.35
     uncond_1token_condensation: bool = True
     cache_cond_block7_stride: int = 2
+    eval_cond_steps: List[int] = field(default_factory=lambda: [0, 2])
+    eval_uncond_steps: List[int] = field(default_factory=lambda: [0, 2])
+    # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum)
+    qaoa_enabled: bool = True
+    qaoa_t_nodes: List[float] = field(default_factory=list)
+    qaoa_t_eval_shifts: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
+    qaoa_dt_scales: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 1.0])
+    qaoa_cfg_scales: List[float] = field(default_factory=lambda: [1.0, 1.0, 1.0, 0.0])
+    qaoa_momentum: List[float] = field(default_factory=lambda: [0.0, 0.08, 0.06, 0.0])
+    qaoa_channel_scale: List[float] = field(default_factory=lambda: [1.0] * 16)
+    qaoa_channel_bias: List[float] = field(default_factory=lambda: [0.0] * 16)
     precompute_static_geometry: bool = True
     precompute_rope_tables: bool = True
     precompute_time_gates: bool = True
@@ -102,7 +113,18 @@ def build_schedule(
 
     # Piecewise schedule aligned with the exact CFG threshold t_low = cfg_range[0]
     t_low = float(cfg_range[0])
-    if 0.0 < t_low < 1.0 and total_steps >= 4:
+    if (
+        solver_cfg.qaoa_enabled
+        and num_steps_override is None
+        and len(solver_cfg.qaoa_t_nodes) == total_steps + 1
+    ):
+        t_seq = torch.tensor(solver_cfg.qaoa_t_nodes, dtype=torch.float32, device=device)
+        n_guided = solver_cfg.n_guided_steps
+        n_unguided = solver_cfg.n_unguided_steps
+        is_guided = [True] * n_guided + [False] * n_unguided
+        return t_seq, is_guided, n_guided
+
+    if 0.0 < t_low < 1.0 and total_steps >= 2:
         # Inverse of t = r * u / (1 + (r - 1) * u)  =>  u = t / (r - (r - 1) * t)
         u_low = t_low / (rescale_t - (rescale_t - 1.0) * t_low)
         if num_steps_override is not None and num_steps_override != solver_cfg.num_inference_steps:
@@ -130,16 +152,51 @@ def build_schedule(
     return t_seq, is_guided, boundary
 
 
+def get_qaoa_eval_timesteps(solver_cfg: SolverConfig, t_list: List[float]) -> List[float]:
+    """
+    Compute the effective evaluation timestamps tau_k in [t_{k+1}, t_k] for each step k
+    using variational QAOA phase shifts `qaoa_t_eval_shifts`.
+    """
+    total_steps = len(t_list) - 1
+    eval_ts: List[float] = []
+    shifts = solver_cfg.qaoa_t_eval_shifts if solver_cfg.qaoa_enabled else []
+    for k in range(total_steps):
+        t_cur = float(t_list[k])
+        t_nxt = float(t_list[k + 1])
+        shift = float(shifts[k]) if k < len(shifts) else 0.0
+        shift = max(0.0, min(0.5, shift))
+        eval_ts.append(t_cur - shift * (t_cur - t_nxt))
+    return eval_ts
+
+
 def should_eval_uncond(
     step_idx: int,
     n_guided: int,
     cfg_stride: int,
     cfg_cache_mode: str,
+    eval_uncond_steps: Optional[List[int]] = None,
 ) -> bool:
     """Determine whether step_idx in [0, n_guided - 1] evaluates the unconditional branch."""
+    if eval_uncond_steps is not None and len(eval_uncond_steps) > 0:
+        return step_idx in eval_uncond_steps
     if cfg_stride <= 1 or cfg_cache_mode == "exact":
         return True
-    # Always evaluate on first step and last guided step before the t=0.5 boundary
     if step_idx == 0 or step_idx == n_guided - 1:
         return True
     return (step_idx % cfg_stride) == 0
+
+
+def should_eval_cond(
+    step_idx: int,
+    n_guided: int,
+    cond7_stride: int,
+    eval_cond_steps: Optional[List[int]] = None,
+) -> bool:
+    """Determine whether step_idx evaluates the full conditioning branch or reuses cached K/V."""
+    if step_idx == 0:
+        return True
+    if eval_cond_steps is not None and len(eval_cond_steps) > 0:
+        return step_idx in eval_cond_steps
+    if cond7_stride <= 1:
+        return True
+    return (step_idx % cond7_stride) == 0

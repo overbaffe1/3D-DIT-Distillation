@@ -37,7 +37,13 @@ from lib.fast_kernels import (
     precompute_rope_3d_table,
     preload_extensions,
 )
-from lib.fast_sampler import SolverConfig, build_schedule, should_eval_uncond
+from lib.fast_sampler import (
+    SolverConfig,
+    build_schedule,
+    get_qaoa_eval_timesteps,
+    should_eval_cond,
+    should_eval_uncond,
+)
 
 
 class OptimizedLatDitRunner:
@@ -163,8 +169,11 @@ class OptimizedLatDitRunner:
 
         if self.solver_config.precompute_time_gates and not self.core.use_token:
             t_seq, _, _ = build_schedule(self.solver_config, device=device)
-            for t_val in t_seq[:-1].tolist():
+            t_list = t_seq.tolist()
+            for t_val in t_list[:-1]:
                 self._get_time_gates(float(t_val), device, target_dtype)
+            for t_eval in get_qaoa_eval_timesteps(self.solver_config, t_list):
+                self._get_time_gates(float(t_eval), device, target_dtype)
 
     def _get_rope_3d_table(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
         cached = self._rope_3d_cache.get(device)
@@ -662,24 +671,32 @@ class OptimizedLatDitRunner:
         )
         t_list = t_seq.tolist()
         total_steps = len(is_guided)
+        eval_t_list = get_qaoa_eval_timesteps(self.solver_config, t_list)
 
         use_ab2 = self.solver_config.solver_type == "piecewise_ab2"
+        use_qaoa = self.solver_config.qaoa_enabled and (
+            self.solver_config.solver_type == "piecewise_qaoa"
+            or len(self.solver_config.qaoa_dt_scales) > 0
+        )
         ab2_max_ratio = float(self.solver_config.ab2_max_ratio)
         cfg_stride = int(self.solver_config.cfg_stride)
         cfg_mode = self.solver_config.cfg_cache_mode
         cfg_alpha = float(self.solver_config.cfg_extrapolation_alpha)
         cond7_stride = int(self.solver_config.cache_cond_block7_stride)
+        eval_cond_steps = self.solver_config.eval_cond_steps
+        eval_uncond_steps = self.solver_config.eval_uncond_steps
 
         prev_v: Optional[torch.Tensor] = None
         prev_dt: Optional[float] = None
         last_delta: Optional[torch.Tensor] = None
         prev_delta: Optional[torch.Tensor] = None
         last_neg: Optional[torch.Tensor] = None
-        last_cond7: Optional[torch.Tensor] = None
+        last_cond7: Optional[List[torch.Tensor]] = None
 
         for step_idx in range(total_steps):
             t_val = float(t_list[step_idx])
             t_next = float(t_list[step_idx + 1])
+            t_eval = float(eval_t_list[step_idx])
             dt = t_val - t_next
             guided = (guidance_scale > 0.0) and is_guided[step_idx]
 
@@ -688,30 +705,30 @@ class OptimizedLatDitRunner:
                 prev_v = None
                 prev_dt = None
 
-            use_cached_cond7 = (
-                (cond7_stride > 1)
-                and (step_idx % cond7_stride != 0)
-                and (last_cond7 is not None)
-                and (step_idx != n_guided)
-            )
-            if use_cached_cond7:
+            eval_cond = should_eval_cond(step_idx, n_guided, cond7_stride, eval_cond_steps)
+            need_cond_cache = (cond7_stride > 1) or (eval_cond_steps is not None and len(eval_cond_steps) > 0)
+
+            if (not eval_cond) and (last_cond7 is not None):
                 v_pos = self.forward_flow_fast(
-                    xt, t_val, context, clf_token, geom, uncond=False, cached_cond_block7=last_cond7
+                    xt, t_eval, context, clf_token, geom, uncond=False, cached_cond_block7=last_cond7
                 )
-            elif cond7_stride > 1:
+            elif need_cond_cache:
                 v_pos, last_cond7 = self.forward_flow_fast(
-                    xt, t_val, context, clf_token, geom, uncond=False, return_cond_block7=True
+                    xt, t_eval, context, clf_token, geom, uncond=False, return_cond_block7=True
                 )
             else:
                 v_pos = self.forward_flow_fast(
-                    xt, t_val, context, clf_token, geom, uncond=False
+                    xt, t_eval, context, clf_token, geom, uncond=False
                 )
 
             if guided:
-                eval_neg = should_eval_uncond(step_idx, n_guided, cfg_stride, cfg_mode) or (last_delta is None)
+                eval_neg = (
+                    should_eval_uncond(step_idx, n_guided, cfg_stride, cfg_mode, eval_uncond_steps)
+                    or (last_delta is None)
+                )
                 if eval_neg:
                     v_neg = self.forward_flow_fast(
-                        xt, t_val, context, clf_token, geom, uncond=True
+                        xt, t_eval, context, clf_token, geom, uncond=True
                     )
                     cur_delta = v_pos - v_neg
                     if last_delta is not None:
@@ -725,7 +742,11 @@ class OptimizedLatDitRunner:
                         cur_delta = last_delta + cfg_alpha * (last_delta - prev_delta)
                     else:
                         cur_delta = last_delta
-                v = v_pos + guidance_scale * cur_delta
+
+                cfg_mult = 1.0
+                if use_qaoa and step_idx < len(self.solver_config.qaoa_cfg_scales):
+                    cfg_mult = float(self.solver_config.qaoa_cfg_scales[step_idx])
+                v = v_pos + (guidance_scale * cfg_mult) * cur_delta
             else:
                 v = v_pos
 
@@ -740,15 +761,39 @@ class OptimizedLatDitRunner:
                     b_i = shifts[step_idx].to(device=device, dtype=v.dtype).view(1, -1)
                     v = v + b_i
 
-            if use_ab2 and (prev_v is not None) and (prev_dt is not None):
+            if use_qaoa:
+                mom = 0.0
+                if step_idx < len(self.solver_config.qaoa_momentum):
+                    mom = float(self.solver_config.qaoa_momentum[step_idx])
+                if (prev_v is not None) and abs(mom) > 1e-7:
+                    v_step = (1.0 + mom) * v - mom * prev_v
+                else:
+                    v_step = v
+                dt_scale = 1.0
+                if step_idx < len(self.solver_config.qaoa_dt_scales):
+                    dt_scale = float(self.solver_config.qaoa_dt_scales[step_idx])
+                dt_eff = dt * dt_scale
+            elif use_ab2 and (prev_v is not None) and (prev_dt is not None):
                 ratio = min(0.5 * (dt / max(prev_dt, 1e-6)), ab2_max_ratio)
                 v_step = (1.0 + ratio) * v - ratio * prev_v
+                dt_eff = dt
             else:
                 v_step = v
+                dt_eff = dt
 
             prev_v = v
             prev_dt = dt
-            xt = xt - dt * v_step
+            xt = xt - dt_eff * v_step
+
+        # Optional QAOA per-channel output calibration
+        if use_qaoa and len(self.solver_config.qaoa_channel_scale) == self.latent_dim:
+            ch_s = torch.tensor(
+                self.solver_config.qaoa_channel_scale, device=device, dtype=torch.float32
+            ).view(1, -1)
+            ch_b = torch.tensor(
+                self.solver_config.qaoa_channel_bias, device=device, dtype=torch.float32
+            ).view(1, -1)
+            xt = xt * ch_s + ch_b
 
         # Unpermute back to original vox_idxs order and denormalize once
         xt_orig = xt[geom["up_widx"]]
