@@ -54,6 +54,9 @@ class SolverConfig:
     ertacache_euler_alpha: float = 0.04
     sencache_sensitivity_scale: bool = True
     single_gate_fast_path: bool = True
+    dmd_exp_decay_lambda: float = 0.015
+    fused_1tok_linear_collapse: bool = True
+    fused_cond_gate_add: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

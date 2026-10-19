@@ -152,6 +152,9 @@ def test_pytorch_pipeline() -> None:
             print(f"   neg_pred (1-token vs 4101-token) max_abs_diff={neg_diff:.2e}, cos_sim={neg_cos:.8f}")
             assert pos_cos > 0.9999, f"pos_pred cosine similarity too low: {pos_cos}"
             assert neg_cos > 0.9999, f"neg_pred cosine similarity too low: {neg_cos}"
+            assert hasattr(sol_model.runner.flow.blocks[0], "_cond_1tok_msa_w")
+            assert hasattr(sol_model.runner.flow.blocks[0], "_cond_1tok_q_and_out_cr_w")
+            assert hasattr(sol_model.runner.flow.blocks[-1], "_cond_1tok_cr_w")
 
             # Test full generate() call and metadata recording
             g = torch.Generator(device=device).manual_seed(123)

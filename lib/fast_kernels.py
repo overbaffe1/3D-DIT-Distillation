@@ -497,6 +497,34 @@ def fast_gate_add(
     return residual + fast_gate(h, sizes, scale)
 
 
+def fast_gate_add_cond(
+    cond: torch.Tensor,
+    h: torch.Tensor,
+    scale: torch.Tensor,
+) -> torch.Tensor:
+    """Fused cond + h * cg[:, None] using single-kernel torch.addcmul for [B, L, D] conditioning."""
+    if cond.shape[0] == 1:
+        g = getattr(scale, "_g_3d", None)
+        if g is None or g.dtype != h.dtype:
+            g = scale.view(1, 1, -1).to(dtype=h.dtype)
+        return torch.addcmul(cond, h, g)
+    return torch.addcmul(cond, h, scale[:, None].to(dtype=h.dtype))
+
+
+def fast_modulate_preln_cond(
+    ln_cond: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+) -> torch.Tensor:
+    """Fused affine modulation `ln_cond * (1 + scale) + shift` on pre-normalized `ln_cond_after_7`."""
+    if ln_cond.shape[0] == 1:
+        w = getattr(scale, "_w_3d", None)
+        b = getattr(shift, "_b_3d", None)
+        if w is not None and b is not None and w.dtype == ln_cond.dtype:
+            return torch.addcmul(b, ln_cond, w)
+    return torch.addcmul(shift[:, None], ln_cond, 1.0 + scale[:, None])
+
+
 def fast_rms_norm(
     x: torch.Tensor,
     weight: Optional[torch.Tensor] = None,

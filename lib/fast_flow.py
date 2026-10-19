@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,9 +23,11 @@ from lib.fast_kernels import (
     build_order_caches_fast,
     fast_gate,
     fast_gate_add,
+    fast_gate_add_cond,
     fast_layer_norm,
     fast_modulate,
     fast_modulate_cond,
+    fast_modulate_preln_cond,
     fast_rms_norm,
     fast_sparse_conv3d,
     fast_swiglu,
@@ -186,12 +189,76 @@ class OptimizedLatDitRunner:
                     if block.cond_to_qkv_cross.bias is not None
                     else None
                 )
+                # Algebraic 2-Layer Linear Collapse for 1-Token Uncond Self-Attn & Cross-Attn:
+                # 1. `cond_to_out(cond_to_v(h_cond))` -> single GEMM `_cond_1tok_msa_w/b`
+                w_out_m = block.cond_to_out.weight.detach().float()
+                b_out_m = (
+                    block.cond_to_out.bias.detach().float()
+                    if block.cond_to_out.bias is not None
+                    else torch.zeros(D, device=device, dtype=torch.float32)
+                )
+                w_v_m = block._cond_to_v_w.detach().float()
+                b_v_m = (
+                    block._cond_to_v_b.detach().float()
+                    if block._cond_to_v_b is not None
+                    else torch.zeros(D, device=device, dtype=torch.float32)
+                )
+                block._cond_1tok_msa_w = (w_out_m @ w_v_m).to(dtype=target_dtype).contiguous()
+                block._cond_1tok_msa_b = (w_out_m @ b_v_m + b_out_m).to(dtype=target_dtype).contiguous()
+
+                # 2. `to_out_cross(cond_to_v_cross(h_cond_cr))` -> single GEMM `_cond_1tok_cr_w/b`
+                #    plus packed `[Q_cc; to_out_cross(V_cc)]` (`[2*D, D]`) for `not skip_cond_out`!
+                w_out_cr = block.to_out_cross.weight.detach().float()
+                b_out_cr = (
+                    block.to_out_cross.bias.detach().float()
+                    if block.to_out_cross.bias is not None
+                    else torch.zeros(D, device=device, dtype=torch.float32)
+                )
+                w_vc = block._cond_to_v_cross_slice_w.detach().float()
+                b_vc = (
+                    block._cond_to_v_cross_slice_b.detach().float()
+                    if block._cond_to_v_cross_slice_b is not None
+                    else torch.zeros(D, device=device, dtype=torch.float32)
+                )
+                w_cr_1tok = w_out_cr @ w_vc
+                b_cr_1tok = w_out_cr @ b_vc + b_out_cr
+                block._cond_1tok_cr_w = w_cr_1tok.to(dtype=target_dtype).contiguous()
+                block._cond_1tok_cr_b = b_cr_1tok.to(dtype=target_dtype).contiguous()
+
+                w_qc = block.cond_to_qkv_cross.weight[:D, :].detach().float()
+                b_qc = (
+                    block.cond_to_qkv_cross.bias[:D].detach().float()
+                    if block.cond_to_qkv_cross.bias is not None
+                    else torch.zeros(D, device=device, dtype=torch.float32)
+                )
+                block._cond_1tok_q_and_out_cr_w = (
+                    torch.cat([w_qc, w_cr_1tok], dim=0).to(dtype=target_dtype).contiguous()
+                )
+                block._cond_1tok_q_and_out_cr_b = (
+                    torch.cat([b_qc, b_cr_1tok], dim=0).to(dtype=target_dtype).contiguous()
+                )
             else:
                 # In cond_to_kv_cross ([2*D, D]), slice [D:2*D] is V only
                 block._cond_to_v_cross_w = block.cond_to_kv_cross.weight[D:, :].contiguous()
                 block._cond_to_v_cross_b = (
                     block.cond_to_kv_cross.bias[D:].contiguous() if block.cond_to_kv_cross.bias is not None else None
                 )
+                # Algebraic 2-Layer Linear Collapse in blocks 8..23:
+                # `to_out_cross(cond_to_v_cross(h_cond_cr))` -> single GEMM `_cond_1tok_cr_w/b`!
+                w_out_cr = block.to_out_cross.weight.detach().float()
+                b_out_cr = (
+                    block.to_out_cross.bias.detach().float()
+                    if block.to_out_cross.bias is not None
+                    else torch.zeros(D, device=device, dtype=torch.float32)
+                )
+                w_vc = block._cond_to_v_cross_w.detach().float()
+                b_vc = (
+                    block._cond_to_v_cross_b.detach().float()
+                    if block._cond_to_v_cross_b is not None
+                    else torch.zeros(D, device=device, dtype=torch.float32)
+                )
+                block._cond_1tok_cr_w = (w_out_cr @ w_vc).to(dtype=target_dtype).contiguous()
+                block._cond_1tok_cr_b = (w_out_cr @ b_vc + b_out_cr).to(dtype=target_dtype).contiguous()
 
         self._zero_clf_token = torch.zeros(1, self.dim, device=device, dtype=target_dtype).contiguous()
 
@@ -385,6 +452,7 @@ class OptimizedLatDitRunner:
                         s_t._w_1ps = (1.0 + s_t.view(-1)).contiguous()
                         sh_t._b_1d = sh_t.view(-1).contiguous()
                         g_t._g_2d = g_t.view(1, -1).contiguous()
+                        g_t._g_3d = g_t._g_2d.unsqueeze(1)
                 cond_gates.append(cg_tuple)
             else:
                 if block.clf_shared:
@@ -399,6 +467,8 @@ class OptimizedLatDitRunner:
                     cs_cr, csh_cr = cg_tuple2
                     cs_cr._w_1ps = (1.0 + cs_cr.view(-1)).contiguous()
                     csh_cr._b_1d = csh_cr.view(-1).contiguous()
+                    cs_cr._w_3d = cs_cr._w_1ps.view(1, 1, -1)
+                    csh_cr._b_3d = csh_cr._b_1d.view(1, 1, -1)
                 cond_gates.append(cg_tuple2)
 
         out_scale, out_shift = self.flow.out_gates(clf).chunk(2, dim=-1)
@@ -601,6 +671,13 @@ class OptimizedLatDitRunner:
         bary_beta = float(getattr(self.solver_config, "barycache_crf_beta", 0.10))
         qmc_stride = int(getattr(self.solver_config, "hilbert_qmc_uncond_stride", 4))
         pos_qmc_stride = int(getattr(self.solver_config, "hilbert_qmc_pos_stride", 4))
+        dmd_lambda = float(getattr(self.solver_config, "dmd_exp_decay_lambda", 0.015))
+        use_1tok_collapse = bool(getattr(self.solver_config, "fused_1tok_linear_collapse", True))
+        eff_mid_scale = (
+            float(mid_cache_scale) * math.exp(-dmd_lambda * max(0.0, 1.0 - float(t_val)))
+            if dmd_lambda > 0.0
+            else float(mid_cache_scale)
+        )
 
         # Single-Gate Fast Path (`block0_only`): on cached steps that exit in Block 0 before `block.cond`,
         # skip computing 23 unused `block_gates[1..23]` and 24 unused `cond_gates[0..23]`!
@@ -636,9 +713,9 @@ class OptimizedLatDitRunner:
                 and not return_cond_delta
                 and not return_ln_cond7
             ):
-                # Fast Uncond CRF Short-Circuit (FreqCa + DiTFastAttn + RA-CFGCache):
-                # Directly fuse shared Block-0 MSA output with uncond CRF and project to FP32 velocity!
-                x = x + cached_mid_delta * float(mid_cache_scale)
+                # Fast Uncond CRF Short-Circuit (FreqCa + DiTFastAttn + DMD Exponential Decay):
+                # Single-kernel `torch.add(..., alpha=...)` without temporary [N, 1536] allocation!
+                x = torch.add(x, cached_mid_delta, alpha=eff_mid_scale)
                 x = fast_modulate(x, sizes, tg["out_scale"], tg["out_shift"])
                 return F.linear(x.float(), self._unpatchify_w_fp32)
         else:
@@ -685,7 +762,7 @@ class OptimizedLatDitRunner:
             if can_mid_cache:
                 if cached_mid_delta is not None and mid_start <= b_idx < mid_end:
                     if b_idx == mid_start:
-                        x = x + cached_mid_delta * float(mid_cache_scale)
+                        x = torch.add(x, cached_mid_delta, alpha=eff_mid_scale)
                         if (not uncond) and use_freqca_crf and x_b0_msa is not None:
                             # Refresh FreqCa Cumulative Residual Feature (CRF) at Step 2 for Step 3!
                             self._last_pos_crf_after_b0_msa = x - x_b0_msa
@@ -729,7 +806,7 @@ class OptimizedLatDitRunner:
                     if cached_mid_delta is not None:
                         # FreqCa CRF (NeurIPS 2026) + DiTFastAttn: `cached_mid_delta` for uncond already
                         # spans from `x_after_b0_msa` to `x_after_23` (including Block-0 cross-attn & FFN)!
-                        x = x + cached_mid_delta * float(mid_cache_scale)
+                        x = torch.add(x, cached_mid_delta, alpha=eff_mid_scale)
                         break
                     elif return_mid_delta:
                         x_mid_in = x
@@ -743,7 +820,7 @@ class OptimizedLatDitRunner:
                     ):
                         # FreqCa CRF (NeurIPS 2026) + DBCache-FoCa Heun Calibrator (vipshop/cache-dit 2026)
                         # + BaryCache/L2P-Cache 2-Anchor Extrapolation (arXiv:2608.28670 / CVPR 2026)
-                        # + SenCache Sensitivity Scaling (CVPR 2026, vita-epfl/SenCache) on fast pos steps (1, 3):
+                        # + SenCache Sensitivity Scaling (CVPR 2026) + Prony/DMD Exponential Decay on fast pos steps (1, 3):
                         cur_fn_res = x - x_patchify
                         crf_base = self._last_pos_crf_after_b0_msa
                         crf_s0 = getattr(self, "_last_pos_crf_after_b0_msa_step0", None)
@@ -753,16 +830,18 @@ class OptimizedLatDitRunner:
                             and crf_s0 is not crf_base
                             and crf_s0.shape == (N, D)
                         ):
-                            eff_beta = bary_beta * float(mid_cache_scale) if use_sencache else bary_beta
-                            crf_base = (1.0 + eff_beta) * crf_base - eff_beta * crf_s0
-                        x = x + crf_base * float(mid_cache_scale)
+                            eff_beta = bary_beta * eff_mid_scale if use_sencache else bary_beta
+                            x = torch.add(x, crf_base, alpha=eff_mid_scale * (1.0 + eff_beta))
+                            x = torch.add(x, crf_s0, alpha=-eff_mid_scale * eff_beta)
+                        else:
+                            x = torch.add(x, crf_base, alpha=eff_mid_scale)
                         if (
                             use_subblock_crf
                             and foca_gamma > 0.0
                             and getattr(self, "_last_b0_fn_res", None) is not None
                             and self._last_b0_fn_res.shape == (N, D)
                         ):
-                            x = x + foca_gamma * (cur_fn_res - self._last_b0_fn_res)
+                            x = torch.add(x, cur_fn_res - self._last_b0_fn_res, alpha=foca_gamma)
                         break
                     else:
                         x_b0_msa = x
@@ -785,13 +864,17 @@ class OptimizedLatDitRunner:
                             # fuse Subblock-2 CRF + FoCa Heun increment, refresh `_last_pos_crf_after_b0_msa`,
                             # and bypass Block-0 DINO Self-Attn, Cross-Attn, FFN+SparseConv3D, and Blocks 1..23!
                             x = fast_gate_add(x, self._last_b0_cr_proj, sizes, g_cr)
-                            x = x + self._last_pos_crf_after_b0_cr * float(mid_cache_scale)
+                            x = torch.add(x, self._last_pos_crf_after_b0_cr, alpha=eff_mid_scale)
                             if (
                                 foca_gamma > 0.0
                                 and getattr(self, "_last_b0_fn_res_step0", None) is not None
                                 and self._last_b0_fn_res_step0.shape == (N, D)
                             ):
-                                x = x + foca_gamma * ((x_b0_msa - x_patchify) - self._last_b0_fn_res_step0)
+                                x = torch.add(
+                                    x,
+                                    (x_b0_msa - x_patchify) - self._last_b0_fn_res_step0,
+                                    alpha=foca_gamma,
+                                )
                             self._last_pos_crf_after_b0_msa = x - x_b0_msa
                             break
 
@@ -809,27 +892,45 @@ class OptimizedLatDitRunner:
                 )
 
                 if use_1tok_uncond:
-                    # Exact 1-token unconditional self-attention: only V projection needed!
+                    # Exact 1-token unconditional self-attention: algebraic 2-layer collapse `cond_to_out(cond_to_v(h_cond))`!
                     h_cond = fast_modulate_cond(cond, cs_msa, csh_msa)
-                    v_w = getattr(block, "_cond_to_v_w", None)
-                    if v_w is not None:
-                        v_cond = F.linear(h_cond, v_w, getattr(block, "_cond_to_v_b", None))
+                    m1_w = getattr(block, "_cond_1tok_msa_w", None) if use_1tok_collapse else None
+                    if m1_w is not None:
+                        cond_msa_out = F.linear(h_cond, m1_w, getattr(block, "_cond_1tok_msa_b", None))
                     else:
-                        v_cond = block.cond_to_qkv(h_cond).view(1, 1, 3, D)[:, :, 2]
-                    cond = cond + block.cond_to_out(v_cond) * cg_msa[:, None]
+                        v_w = getattr(block, "_cond_to_v_w", None)
+                        if v_w is not None:
+                            v_cond = F.linear(h_cond, v_w, getattr(block, "_cond_to_v_b", None))
+                        else:
+                            v_cond = block.cond_to_qkv(h_cond).view(1, 1, 3, D)[:, :, 2]
+                        cond_msa_out = block.cond_to_out(v_cond)
+                    cond = fast_gate_add_cond(cond, cond_msa_out, cg_msa)
 
-                    # Exact 1-token cross-attention:
-                    # x -> cond output is identically v_cond_cross for all N voxels!
+                    # Exact 1-token cross-attention: algebraic 2-layer collapse `to_out_cross(cond_to_v_cross(h_cond_cr))`!
                     h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
                     if skip_cond_out:
-                        vc_w = getattr(block, "_cond_to_v_cross_slice_w", None)
-                        if vc_w is not None:
-                            v_cc = F.linear(h_cond_cr, vc_w, getattr(block, "_cond_to_v_cross_slice_b", None)).view(1, D)
+                        c1_w = getattr(block, "_cond_1tok_cr_w", None) if use_1tok_collapse else None
+                        if c1_w is not None:
+                            h_x_cross = F.linear(h_cond_cr.view(1, D), c1_w, getattr(block, "_cond_1tok_cr_b", None))
                         else:
-                            v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, D)[:, 2]
+                            vc_w = getattr(block, "_cond_to_v_cross_slice_w", None)
+                            if vc_w is not None:
+                                v_cc = F.linear(
+                                    h_cond_cr, vc_w, getattr(block, "_cond_to_v_cross_slice_b", None)
+                                ).view(1, D)
+                            else:
+                                v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, D)[:, 2]
+                            h_x_cross = block.to_out_cross(v_cc)
                     else:
-                        q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
-                    h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
+                        qo_w = getattr(block, "_cond_1tok_q_and_out_cr_w", None) if use_1tok_collapse else None
+                        if qo_w is not None:
+                            q_cc_flat, h_x_cross = F.linear(
+                                h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
+                            ).chunk(2, dim=-1)
+                            q_cc = q_cc_flat.view(1, H, HD)
+                        else:
+                            q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
+                            h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
 
                     if not skip_cond_out:
                         # cond -> x only needed if subsequent blocks read `cond` (must use `x` before gate_add!)
@@ -861,12 +962,12 @@ class OptimizedLatDitRunner:
                         h_c_cross = flash_cross_attn(
                             q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seq_use, q_max_use
                         )
-                        cond = cond + block.cond_to_out_cross(h_c_cross.view(1, 1, D)) * cg_cr[:, None]
+                        cond = fast_gate_add_cond(cond, block.cond_to_out_cross(h_c_cross.view(1, 1, D)), cg_cr)
 
                         # 1-token cond FFN
                         h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
                         hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
-                        cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
+                        cond = fast_gate_add_cond(cond, block.cond_ffn1(fast_swiglu(hc_gate, hc)), cg_mlp)
 
                     x = fast_gate_add(x, h_x_cross, sizes, g_cr)
 
@@ -911,7 +1012,7 @@ class OptimizedLatDitRunner:
                     ):
                         # HetCache (arXiv:2603.24260, 2026): static DINO context tokens in Block 0
                         # reuse their O(L^2) self-attention output projection modulated by current `cg_msa(t)`!
-                        cond = cond + self._last_b0_cond_msa_out * cg_msa[:, None]
+                        cond = fast_gate_add_cond(cond, self._last_b0_cond_msa_out, cg_msa)
                     else:
                         h_cond = fast_modulate_cond(cond, cs_msa, csh_msa)
                         qkv_cond = block.cond_to_qkv(h_cond).view(batch_size, L, 3, H, HD)
@@ -924,7 +1025,7 @@ class OptimizedLatDitRunner:
                         cond_msa_proj = block.cond_to_out(h_cond.reshape(batch_size, L, D))
                         if b_idx == 0 and not uncond:
                             self._last_b0_cond_msa_out = cond_msa_proj
-                        cond = cond + cond_msa_proj * cg_msa[:, None]
+                        cond = fast_gate_add_cond(cond, cond_msa_proj, cg_msa)
 
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                     h_cond_cr = fast_modulate_cond(cond, cs_cr, csh_cr)
@@ -1024,11 +1125,13 @@ class OptimizedLatDitRunner:
                             q_seq_pos,
                             q_max_pos,
                         )
-                        cond = cond + block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D)) * cg_cr[:, None]
+                        cond = fast_gate_add_cond(
+                            cond, block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D)), cg_cr
+                        )
 
                         h_cond_mlp = fast_modulate_cond(cond, cs_mlp, csh_mlp)
                         hc, hc_gate = block.cond_ffn0(h_cond_mlp).chunk(2, dim=-1)
-                        cond = cond + block.cond_ffn1(fast_swiglu(hc_gate, hc)) * cg_mlp[:, None]
+                        cond = fast_gate_add_cond(cond, block.cond_ffn1(fast_swiglu(hc_gate, hc)), cg_mlp)
 
                 if b_idx == self.cond_depth - 1 and cached_cond_block7 is None:
                     if return_cond_delta and cond_mid_in is not None:
@@ -1040,14 +1143,19 @@ class OptimizedLatDitRunner:
 
                 if use_1tok_uncond:
                     # Exact 1-token cross-attn in blocks 8..23:
-                    # Skips modulate(x), to_q_cross(x), FlashAttention, and N-voxel to_out_cross!
-                    h_cond_cr = ln_cond_after_7 * (1.0 + cs_cr[:, None]) + csh_cr[:, None]
-                    v_w = getattr(block, "_cond_to_v_cross_w", None)
-                    if v_w is not None:
-                        v_cc = F.linear(h_cond_cr, v_w, getattr(block, "_cond_to_v_cross_b", None)).view(1, D)
+                    # Algebraic 2-layer collapse `to_out_cross(cond_to_v_cross(h_cond_cr))` in 1 GEMM!
+                    h_cond_cr = fast_modulate_preln_cond(ln_cond_after_7, cs_cr, csh_cr)
+                    c1_w = getattr(block, "_cond_1tok_cr_w", None) if use_1tok_collapse else None
+                    if c1_w is not None:
+                        h_x_cross = F.linear(h_cond_cr.view(1, D), c1_w, getattr(block, "_cond_1tok_cr_b", None))
                     else:
-                        v_cc = block.cond_to_kv_cross(h_cond_cr).view(1, 2, D)[:, 1]
-                    x = fast_gate_add(x, block.to_out_cross(v_cc), sizes, g_cr)
+                        v_w = getattr(block, "_cond_to_v_cross_w", None)
+                        if v_w is not None:
+                            v_cc = F.linear(h_cond_cr, v_w, getattr(block, "_cond_to_v_cross_b", None)).view(1, D)
+                        else:
+                            v_cc = block.cond_to_kv_cross(h_cond_cr).view(1, 2, D)[:, 1]
+                        h_x_cross = block.to_out_cross(v_cc)
+                    x = fast_gate_add(x, h_x_cross, sizes, g_cr)
                 elif cached_cond_block7 is not None:
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
@@ -1058,7 +1166,7 @@ class OptimizedLatDitRunner:
                     x = fast_gate_add(x, block.to_out_cross(h_x_out.reshape(N, D)), sizes, g_cr)
                 else:
                     L = cond.shape[1]
-                    h_cond_cr = ln_cond_after_7 * (1.0 + cs_cr[:, None]) + csh_cr[:, None]
+                    h_cond_cr = fast_modulate_preln_cond(ln_cond_after_7, cs_cr, csh_cr)
                     h_x = fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
                     kv_cc = block.cond_to_kv_cross(h_cond_cr).view(batch_size * L, 2, H, HD)
@@ -1078,14 +1186,18 @@ class OptimizedLatDitRunner:
                     # DBCache-FoCa Subblock-2 CRF (vipshop/cache-dit 2026 + FreqCa NeurIPS 2026):
                     # On Step 2 (pos), after updating 3D MSA + DINO Cross-Attn in Block 0,
                     # bypass Block 0's heavy FFN0(1536->8192) + 3x3x3 SparseConv + FFN1 and Blocks 1..23!
-                    x = x + self._last_pos_crf_after_b0_cr * float(mid_cache_scale)
+                    x = torch.add(x, self._last_pos_crf_after_b0_cr, alpha=eff_mid_scale)
                     if (
                         foca_gamma > 0.0
                         and x_b0_msa is not None
                         and getattr(self, "_last_b0_fn_res_step0", None) is not None
                         and self._last_b0_fn_res_step0.shape == (N, D)
                     ):
-                        x = x + foca_gamma * ((x_b0_msa - x_patchify) - self._last_b0_fn_res_step0)
+                        x = torch.add(
+                            x,
+                            (x_b0_msa - x_patchify) - self._last_b0_fn_res_step0,
+                            alpha=foca_gamma,
+                        )
                     if x_b0_msa is not None:
                         self._last_pos_crf_after_b0_msa = x - x_b0_msa
                     break

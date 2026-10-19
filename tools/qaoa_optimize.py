@@ -210,7 +210,8 @@ class CalibratedTeacherEnsemble:
         mismatch = t_actual - tau
         mid_factor = 1.0
         if mid_cache_scale is not None:
-            mid_factor = (2.0 / 3.0) + (1.0 / 3.0) * float(mid_cache_scale) * 1.015
+            dmd_decay = math.exp(-0.015 * max(0.0, 1.0 - t_actual))
+            mid_factor = (2.0 / 3.0) + (1.0 / 3.0) * float(mid_cache_scale) * dmd_decay * 1.015
 
         for m in range(self.num_modes):
             v_row = []
@@ -701,6 +702,9 @@ class CalibratedTeacherEnsemble:
         qmc_stride = int(cfg.get("hilbert_qmc_uncond_stride", 4))
         pos_qmc_stride = int(cfg.get("hilbert_qmc_pos_stride", 4))
         single_gate_fp = bool(cfg.get("single_gate_fast_path", True))
+        dmd_lambda = float(cfg.get("dmd_exp_decay_lambda", 0.015))
+        collapse_1tok = bool(cfg.get("fused_1tok_linear_collapse", True))
+        fused_cond_gate = bool(cfg.get("fused_cond_gate_add", True))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         dino_b0_factor = 0.0 if pab_step2 else (0.10 if (foca_dbe and hetcache_b0) else (0.42 if foca_dbe else 1.0))
         active_dino_ratio = (
@@ -709,20 +713,36 @@ class CalibratedTeacherEnsemble:
             else 1.0
         )
         cond_refresh_vox_factor = (
-            0.20 if (pab_step2 and single_gate_fp) else (0.23 if pab_step2 else (0.30 if subblock_crf else 0.66))
+            0.185
+            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate)
+            else (0.20 if (pab_step2 and single_gate_fp) else (0.23 if pab_step2 else (0.30 if subblock_crf else 0.66)))
         )
         fast_pos_factor = (
-            0.195 if (freqca_crf and single_gate_fp) else (0.22 if freqca_crf else (0.46 if pab_cr_bcast else 0.66))
+            0.180
+            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate)
+            else (0.195 if (freqca_crf and single_gate_fp) else (0.22 if freqca_crf else (0.46 if pab_cr_bcast else 0.66)))
         )
         fast_neg_factor = 0.015 if (freqca_crf and b0_msa_share and hetcache_b0) else (0.04 if (freqca_crf and b0_msa_share) else 0.34)
-        step0_cond_blocks = 4.65 if (step0_striding and pos_qmc_stride >= 4) else 5.0
+        step0_cond_blocks = (
+            4.45
+            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate)
+            else (4.65 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
+        )
         step0_pos_cost = (0.34 * (step0_cond_blocks / 8.0) + 0.66 * (7.0 / 24.0)) if step0_striding else 1.00
-        step0_neg_blocks = 3.1 if (step0_striding and b0_msa_share and qmc_stride >= 4) else (3.5 if (step0_striding and b0_msa_share) else 4.0)
+        step0_neg_blocks = (
+            2.75
+            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok)
+            else (3.1 if (step0_striding and b0_msa_share and qmc_stride >= 4) else (3.5 if (step0_striding and b0_msa_share) else 4.0))
+        )
         step0_neg_cost = (0.34 * (step0_neg_blocks / 24.0)) if step0_striding else 0.34
         fixed_overhead = (
-            0.036
-            if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp)
-            else (0.041 if (pab_step2 and qmc_stride >= 4) else (0.048 if (subblock_crf and hetcache_b0) else 0.11))
+            0.033
+            if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp and collapse_1tok and fused_cond_gate)
+            else (
+                0.036
+                if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp)
+                else (0.041 if (pab_step2 and qmc_stride >= 4) else (0.048 if (subblock_crf and hetcache_b0) else 0.11))
+            )
         )
 
         n_full_pos = sum(1 for k in range(total_steps) if k in eval_cond_steps)
@@ -1165,6 +1185,9 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "ertacache_euler_alpha": 0.04,
         "sencache_sensitivity_scale": True,
         "single_gate_fast_path": True,
+        "dmd_exp_decay_lambda": 0.015,
+        "fused_1tok_linear_collapse": True,
+        "fused_cond_gate_add": True,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1248,6 +1271,9 @@ def run_qaoa_optimization(
             best_cfg["ertacache_euler_alpha"] = 0.04
             best_cfg["sencache_sensitivity_scale"] = True
             best_cfg["single_gate_fast_path"] = True
+            best_cfg["dmd_exp_decay_lambda"] = 0.015
+            best_cfg["fused_1tok_linear_collapse"] = True
+            best_cfg["fused_cond_gate_add"] = True
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)
