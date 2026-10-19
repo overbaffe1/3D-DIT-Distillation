@@ -439,8 +439,12 @@ def fast_modulate(
 ) -> torch.Tensor:
     """Fused LayerNorm + affine modulation (1 + scale) * LN(x) + shift."""
     if len(sizes) == 1:
-        w = 1.0 + scale.view(-1)
-        b = shift.view(-1)
+        w = getattr(scale, "_w_1ps", None)
+        if w is None:
+            w = 1.0 + scale.view(-1)
+        b = getattr(shift, "_b_1d", None)
+        if b is None:
+            b = shift.view(-1)
         return fast_layer_norm(x, w, b, eps=eps)
     return torch.cat(
         [
@@ -459,12 +463,21 @@ def fast_modulate_cond(
 ) -> torch.Tensor:
     """Fused LayerNorm + affine modulation for [B, L, D] conditioning tensor."""
     if cond.shape[0] == 1:
-        return fast_layer_norm(cond, 1.0 + scale.view(-1), shift.view(-1), eps=eps)
+        w = getattr(scale, "_w_1ps", None)
+        if w is None:
+            w = 1.0 + scale.view(-1)
+        b = getattr(shift, "_b_1d", None)
+        if b is None:
+            b = shift.view(-1)
+        return fast_layer_norm(cond, w, b, eps=eps)
     return fast_layer_norm(cond, eps=eps) * (1.0 + scale[:, None]) + shift[:, None]
 
 
 def fast_gate(x: torch.Tensor, sizes: List[int], scale: torch.Tensor) -> torch.Tensor:
     if len(sizes) == 1:
+        g = getattr(scale, "_g_2d", None)
+        if g is not None and g.dtype == x.dtype:
+            return x * g
         return x * scale.view(1, -1).type_as(x)
     return torch.cat([hh * scale[idx].type_as(hh) for idx, hh in enumerate(x.split(sizes))], dim=0)
 
@@ -477,9 +490,9 @@ def fast_gate_add(
 ) -> torch.Tensor:
     """Fused residual + h * gate using single-kernel torch.addcmul when batch_size == 1."""
     if len(sizes) == 1:
-        g = scale.view(1, -1)
-        if g.dtype != h.dtype:
-            g = g.to(dtype=h.dtype)
+        g = getattr(scale, "_g_2d", None)
+        if g is None or g.dtype != h.dtype:
+            g = scale.view(1, -1).to(dtype=h.dtype)
         return torch.addcmul(residual, h, g)
     return residual + fast_gate(h, sizes, scale)
 

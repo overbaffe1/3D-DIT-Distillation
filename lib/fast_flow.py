@@ -80,6 +80,12 @@ class OptimizedLatDitRunner:
         # Precomputed timestep gates cache: keyed by (device, dtype, round(t_val, 7))
         self._time_gates_cache: Dict[Tuple[torch.device, torch.dtype, float], Dict[str, Any]] = {}
 
+        # Precomputed QAOA GPU tensors cache: keyed by (device, dtype)
+        self._qaoa_tensors_cache: Dict[Tuple[torch.device, torch.dtype], Dict[str, Any]] = {}
+
+        # Precomputed static sequence length tensors for batch_size == 1
+        self._seqlen_cache: Dict[Tuple[torch.device, int], torch.Tensor] = {}
+
         # Optional learned per-step calibration scales/shifts (from distillation)
         self.step_calibration: Optional[Dict[str, torch.Tensor]] = None
         if weights_dir is not None:
@@ -175,6 +181,84 @@ class OptimizedLatDitRunner:
             for t_eval in get_qaoa_eval_timesteps(self.solver_config, t_list):
                 self._get_time_gates(float(t_eval), device, target_dtype)
 
+        self._mean_f32 = self.core.mean.detach().view(1, -1).to(device=device, dtype=torch.float32).contiguous()
+        self._std_f32 = self.core.std.detach().view(1, -1).to(device=device, dtype=torch.float32).contiguous()
+        if self.solver_config.qaoa_enabled:
+            self._get_qaoa_tensors(device)
+
+    def _get_qaoa_tensors(self, device: torch.device) -> Dict[str, Any]:
+        """Pre-materialize all QAOA variational matrices and vectors on the target device once."""
+        key = (device, torch.float32)
+        cached = self._qaoa_tensors_cache.get(key)
+        if cached is not None:
+            return cached
+
+        sc = self.solver_config
+        D = self.latent_dim
+        out: Dict[str, Any] = {}
+
+        if len(sc.qaoa_rk_init_mixer) == D:
+            out["b_init_t"] = torch.tensor(sc.qaoa_rk_init_mixer, device=device, dtype=torch.float32).T.contiguous()
+        out["neg_fd_vecs"] = [
+            torch.tensor(row, device=device, dtype=torch.float32).view(1, -1).contiguous()
+            if len(row) == D
+            else None
+            for row in sc.qaoa_neg_fd_scales
+        ]
+        out["step_cfg_vecs"] = [
+            torch.tensor(row, device=device, dtype=torch.float32).view(1, -1).contiguous()
+            if len(row) == D
+            else None
+            for row in sc.qaoa_step_cfg_channels
+        ]
+        out["b_cfg_t"] = [
+            torch.tensor(mat, device=device, dtype=torch.float32).T.contiguous()
+            if len(mat) == D
+            else None
+            for mat in sc.qaoa_rk_cfg_mixers
+        ]
+        out["b_pos_t"] = [
+            torch.tensor(mat, device=device, dtype=torch.float32).T.contiguous()
+            if len(mat) == D
+            else None
+            for mat in sc.qaoa_rk_pos_mixers
+        ]
+        out["mom_vecs"] = [
+            torch.tensor(
+                [
+                    (float(sc.qaoa_momentum[k]) if k < len(sc.qaoa_momentum) else 0.0) + float(x)
+                    for x in row
+                ],
+                device=device,
+                dtype=torch.float32,
+            ).view(1, -1).contiguous()
+            if len(row) == D
+            else None
+            for k, row in enumerate(sc.qaoa_step_momentum_channels)
+        ]
+        out["acc_vecs"] = [
+            torch.tensor(row, device=device, dtype=torch.float32).view(1, -1).contiguous()
+            if len(row) == D
+            else None
+            for row in sc.qaoa_step_accel_channels
+        ]
+        out["step_ch_vecs"] = [
+            torch.tensor(row, device=device, dtype=torch.float32).view(1, -1).contiguous()
+            if len(row) == D
+            else None
+            for row in sc.qaoa_step_channel_scales
+        ]
+        if len(sc.qaoa_channel_mixer) == D:
+            out["ch_mixer_t"] = torch.tensor(sc.qaoa_channel_mixer, device=device, dtype=torch.float32).T.contiguous()
+        if len(sc.qaoa_channel_scale) == D:
+            out["ch_scale"] = torch.tensor(sc.qaoa_channel_scale, device=device, dtype=torch.float32).view(1, -1).contiguous()
+            out["ch_bias"] = torch.tensor(sc.qaoa_channel_bias, device=device, dtype=torch.float32).view(1, -1).contiguous()
+        if len(sc.qaoa_kerr_scales) == D:
+            out["kerr_vec"] = torch.tensor(sc.qaoa_kerr_scales, device=device, dtype=torch.float32).view(1, -1).contiguous()
+
+        self._qaoa_tensors_cache[key] = out
+        return out
+
     def _get_rope_3d_table(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
         cached = self._rope_3d_cache.get(device)
         if cached is None:
@@ -221,18 +305,40 @@ class OptimizedLatDitRunner:
         cond_gates = []
         for b_idx, block in enumerate(self.flow.blocks):
             gb = block.gates.type_as(clf_shared) + clf_shared if block.clf_shared else block.gates(clf)
-            block_gates.append(gb.chunk(9, dim=-1))
+            bg_tuple = gb.chunk(9, dim=-1)
+            if batch_len == 1:
+                s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = bg_tuple
+                for s_t, sh_t, g_t in ((s_msa, sh_msa, g_msa), (s_cr, sh_cr, g_cr), (s_mlp, sh_mlp, g_mlp)):
+                    s_t._w_1ps = (1.0 + s_t.view(-1)).contiguous()
+                    sh_t._b_1d = sh_t.view(-1).contiguous()
+                    g_t._g_2d = g_t.view(1, -1).contiguous()
+            block_gates.append(bg_tuple)
             if block.cond:
                 cgb = block.cond_gates.type_as(clf_shared) + clf_shared if block.clf_shared else block.cond_gates(clf)
-                cond_gates.append(cgb.chunk(9, dim=-1))
+                cg_tuple = cgb.chunk(9, dim=-1)
+                if batch_len == 1:
+                    cs_msa, csh_msa, cg_msa, cs_cr, csh_cr, cg_cr, cs_mlp, csh_mlp, cg_mlp = cg_tuple
+                    for s_t, sh_t, g_t in ((cs_msa, csh_msa, cg_msa), (cs_cr, csh_cr, cg_cr), (cs_mlp, csh_mlp, cg_mlp)):
+                        s_t._w_1ps = (1.0 + s_t.view(-1)).contiguous()
+                        sh_t._b_1d = sh_t.view(-1).contiguous()
+                        g_t._g_2d = g_t.view(1, -1).contiguous()
+                cond_gates.append(cg_tuple)
             else:
                 if block.clf_shared:
                     cgb = block.cond_gates.type_as(clf) + clf_shared[:, 3 * self.dim : 5 * self.dim]
                 else:
                     cgb = block.cond_gates(clf)
-                cond_gates.append(cgb.chunk(2, dim=-1))
+                cg_tuple2 = cgb.chunk(2, dim=-1)
+                if batch_len == 1:
+                    cs_cr, csh_cr = cg_tuple2
+                    cs_cr._w_1ps = (1.0 + cs_cr.view(-1)).contiguous()
+                    csh_cr._b_1d = csh_cr.view(-1).contiguous()
+                cond_gates.append(cg_tuple2)
 
         out_scale, out_shift = self.flow.out_gates(clf).chunk(2, dim=-1)
+        if batch_len == 1:
+            out_scale._w_1ps = (1.0 + out_scale.view(-1)).contiguous()
+            out_shift._b_1d = out_shift.view(-1).contiguous()
         result = {
             "clf": clf,
             "block_gates": block_gates,
@@ -264,11 +370,15 @@ class OptimizedLatDitRunner:
         offs = torch.cumprod((code.max(dim=0).values + 1).flip(dims=(-1,)), 0).flip(dims=(-1,)).long()
         offs = F.pad(offs, (0, 1), value=1)
         full_code = coords_in[:, 0].long() * offs[0] + (code * offs[1:]).sum(dim=-1)
-        windows, up_widx = full_code.unique(return_inverse=True)
-
-        # Since patch_size == 1 and input voxels per batch item are unique, windows has length N
-        perm = torch.empty_like(up_widx)
-        perm[up_widx] = torch.arange(len(up_widx), device=device, dtype=up_widx.dtype)
+        if batch_size == 1:
+            # Single-sample voxel coordinates are strictly unique: argsort avoids D2H stream sync of unique()
+            perm = torch.argsort(full_code)
+            up_widx = torch.empty_like(perm)
+            up_widx[perm] = torch.arange(N, device=device, dtype=perm.dtype)
+        else:
+            windows, up_widx = full_code.unique(return_inverse=True)
+            perm = torch.empty_like(up_widx)
+            perm[up_widx] = torch.arange(len(up_widx), device=device, dtype=up_widx.dtype)
         h_coords = coords_in[perm].int().contiguous()
 
         # Layout & sizes per batch item
@@ -327,13 +437,21 @@ class OptimizedLatDitRunner:
         # Cross-attention sequence lengths
         q_seqlens = torch.tensor([0] + sizes, device=device, dtype=torch.int32).cumsum(0, dtype=torch.int32)
         q_maxlen = int(max(sizes))
-        kv_seqlens_full = torch.tensor(
-            [0] + [cond_tokens] * batch_size, device=device, dtype=torch.int32
-        ).cumsum(0, dtype=torch.int32)
+        kv_full_key = (device, cond_tokens, batch_size)
+        kv_seqlens_full = self._seqlen_cache.get(kv_full_key)
+        if kv_seqlens_full is None:
+            kv_seqlens_full = torch.tensor(
+                [0] + [cond_tokens] * batch_size, device=device, dtype=torch.int32
+            ).cumsum(0, dtype=torch.int32)
+            self._seqlen_cache[kv_full_key] = kv_seqlens_full
         kv_maxlen_full = int(cond_tokens)
-        kv_seqlens_1tok = torch.tensor(
-            [0] + [1] * batch_size, device=device, dtype=torch.int32
-        ).cumsum(0, dtype=torch.int32)
+        kv_1tok_key = (device, 1, batch_size)
+        kv_seqlens_1tok = self._seqlen_cache.get(kv_1tok_key)
+        if kv_seqlens_1tok is None:
+            kv_seqlens_1tok = torch.tensor(
+                [0] + [1] * batch_size, device=device, dtype=torch.int32
+            ).cumsum(0, dtype=torch.int32)
+            self._seqlen_cache[kv_1tok_key] = kv_seqlens_1tok
         kv_maxlen_1tok = 1
 
         return {
@@ -414,9 +532,9 @@ class OptimizedLatDitRunner:
         use_triton = self.solver_config.use_fused_triton_kernels
 
         num_blocks = len(self.flow.blocks)
-        mid_start = int(getattr(self.solver_config, "mid_block_start", 10))
-        mid_end = int(getattr(self.solver_config, "mid_block_end", 18))
-        can_mid_cache = (not uncond) and (mid_start >= self.cond_depth) and (mid_end <= num_blocks) and (mid_start < mid_end)
+        mid_start = int(getattr(self.solver_config, "mid_block_start", 8))
+        mid_end = int(getattr(self.solver_config, "mid_block_end", 20))
+        can_mid_cache = (mid_start >= self.cond_depth) and (mid_end <= num_blocks) and (mid_start < mid_end)
         x_mid_in: Optional[torch.Tensor] = None
         mid_delta_out: Optional[torch.Tensor] = None
 
@@ -721,15 +839,17 @@ class OptimizedLatDitRunner:
         last_neg: Optional[torch.Tensor] = None
         last_cond7: Optional[List[torch.Tensor]] = None
         last_mid_delta: Optional[torch.Tensor] = None
+        last_uncond_mid_delta: Optional[torch.Tensor] = None
         rk_corr: Optional[torch.Tensor] = None
         use_mid_cache = bool(getattr(self.solver_config, "mid_block_cache_enabled", False))
+        use_uncond_mid_cache = use_mid_cache and bool(getattr(self.solver_config, "uncond_mid_block_cache", True))
         mid_scales = getattr(self.solver_config, "qaoa_mid_cache_scales", [])
+        uncond_mid_sc = float(getattr(self.solver_config, "qaoa_uncond_mid_scale", 0.95))
 
-        if use_qaoa and len(self.solver_config.qaoa_rk_init_mixer) == self.latent_dim:
-            b_init = torch.tensor(
-                self.solver_config.qaoa_rk_init_mixer, device=device, dtype=xt.dtype
-            )
-            rk_corr = xt @ b_init.T
+        qt = self._get_qaoa_tensors(device) if use_qaoa else {}
+        b_init_t = qt.get("b_init_t")
+        if b_init_t is not None:
+            rk_corr = xt @ b_init_t
 
         for step_idx in range(total_steps):
             t_val = float(t_list[step_idx])
@@ -786,9 +906,31 @@ class OptimizedLatDitRunner:
                     or (last_delta is None)
                 )
                 if eval_neg:
-                    v_neg = self.forward_flow_fast(
-                        xt, t_eval, context, clf_token, geom, uncond=True
-                    )
+                    if use_uncond_mid_cache and last_uncond_mid_delta is None:
+                        v_neg, last_uncond_mid_delta = self.forward_flow_fast(
+                            xt,
+                            t_eval,
+                            context,
+                            clf_token,
+                            geom,
+                            uncond=True,
+                            return_mid_delta=True,
+                        )
+                    elif use_uncond_mid_cache and last_uncond_mid_delta is not None:
+                        v_neg = self.forward_flow_fast(
+                            xt,
+                            t_eval,
+                            context,
+                            clf_token,
+                            geom,
+                            uncond=True,
+                            cached_mid_delta=last_uncond_mid_delta,
+                            mid_cache_scale=uncond_mid_sc,
+                        )
+                    else:
+                        v_neg = self.forward_flow_fast(
+                            xt, t_eval, context, clf_token, geom, uncond=True
+                        )
                     cur_delta = v_pos - v_neg
                     if last_delta is not None:
                         prev_delta = last_delta
@@ -796,17 +938,9 @@ class OptimizedLatDitRunner:
                     last_neg = v_neg
                 else:
                     if cfg_mode == "neg_reuse" and last_neg is not None:
-                        if (
-                            use_qaoa
-                            and prev_v_pos is not None
-                            and step_idx < len(self.solver_config.qaoa_neg_fd_scales)
-                            and len(self.solver_config.qaoa_neg_fd_scales[step_idx]) == self.latent_dim
-                        ):
-                            fd_vec = torch.tensor(
-                                self.solver_config.qaoa_neg_fd_scales[step_idx],
-                                device=device,
-                                dtype=v_pos.dtype,
-                            ).view(1, -1)
+                        neg_fd_vecs = qt.get("neg_fd_vecs", [])
+                        fd_vec = neg_fd_vecs[step_idx] if (use_qaoa and prev_v_pos is not None and step_idx < len(neg_fd_vecs)) else None
+                        if fd_vec is not None:
                             neg_est = torch.addcmul(last_neg, v_pos - prev_v_pos, fd_vec, value=1.0)
                             cur_delta = v_pos - neg_est
                             last_neg = neg_est
@@ -820,51 +954,31 @@ class OptimizedLatDitRunner:
                 cfg_mult = 1.0
                 if use_qaoa and step_idx < len(self.solver_config.qaoa_cfg_scales):
                     cfg_mult = float(self.solver_config.qaoa_cfg_scales[step_idx])
-                if (
-                    use_qaoa
-                    and step_idx < len(self.solver_config.qaoa_step_cfg_channels)
-                    and len(self.solver_config.qaoa_step_cfg_channels[step_idx]) == self.latent_dim
-                ):
-                    cfg_ch = torch.tensor(
-                        self.solver_config.qaoa_step_cfg_channels[step_idx],
-                        device=device,
-                        dtype=v_pos.dtype,
-                    ).view(1, -1)
+                step_cfg_vecs = qt.get("step_cfg_vecs", [])
+                cfg_ch = step_cfg_vecs[step_idx] if (use_qaoa and step_idx < len(step_cfg_vecs)) else None
+                if cfg_ch is not None:
                     v = torch.addcmul(v_pos, cur_delta, cfg_ch, value=guidance_scale * cfg_mult)
                 else:
                     v = v_pos + (guidance_scale * cfg_mult) * cur_delta
-                if (
-                    use_qaoa
-                    and step_idx < len(self.solver_config.qaoa_rk_cfg_mixers)
-                    and len(self.solver_config.qaoa_rk_cfg_mixers[step_idx]) == self.latent_dim
-                ):
-                    b_cfg = torch.tensor(
-                        self.solver_config.qaoa_rk_cfg_mixers[step_idx],
-                        device=device,
-                        dtype=xt.dtype,
-                    )
+
+                b_cfg_t_list = qt.get("b_cfg_t", [])
+                b_cfg_t = b_cfg_t_list[step_idx] if (use_qaoa and step_idx < len(b_cfg_t_list)) else None
+                if b_cfg_t is not None:
                     cfg_rk_feat = (cur_delta * v_pos) if (not eval_neg) else cur_delta
                     if rk_corr is None:
-                        rk_corr = cfg_rk_feat.to(xt.dtype) @ b_cfg.T
+                        rk_corr = cfg_rk_feat @ b_cfg_t
                     else:
-                        rk_corr = torch.addmm(rk_corr, cfg_rk_feat.to(xt.dtype), b_cfg.T)
+                        rk_corr = torch.addmm(rk_corr, cfg_rk_feat, b_cfg_t)
             else:
                 v = v_pos
 
-            if (
-                use_qaoa
-                and step_idx < len(self.solver_config.qaoa_rk_pos_mixers)
-                and len(self.solver_config.qaoa_rk_pos_mixers[step_idx]) == self.latent_dim
-            ):
-                b_pos = torch.tensor(
-                    self.solver_config.qaoa_rk_pos_mixers[step_idx],
-                    device=device,
-                    dtype=xt.dtype,
-                )
+            b_pos_t_list = qt.get("b_pos_t", [])
+            b_pos_t = b_pos_t_list[step_idx] if (use_qaoa and step_idx < len(b_pos_t_list)) else None
+            if b_pos_t is not None:
                 if rk_corr is None:
-                    rk_corr = v_pos.to(xt.dtype) @ b_pos.T
+                    rk_corr = v_pos @ b_pos_t
                 else:
-                    rk_corr = torch.addmm(rk_corr, v_pos.to(xt.dtype), b_pos.T)
+                    rk_corr = torch.addmm(rk_corr, v_pos, b_pos_t)
 
             prev_v_pos = v_pos
 
@@ -883,34 +997,19 @@ class OptimizedLatDitRunner:
                 mom = 0.0
                 if step_idx < len(self.solver_config.qaoa_momentum):
                     mom = float(self.solver_config.qaoa_momentum[step_idx])
-                has_mom_ch = (
-                    step_idx < len(self.solver_config.qaoa_step_momentum_channels)
-                    and len(self.solver_config.qaoa_step_momentum_channels[step_idx]) == self.latent_dim
-                )
-                if prev_v is not None and (abs(mom) > 1e-7 or has_mom_ch):
-                    if has_mom_ch:
-                        mom_vec = torch.tensor(
-                            [mom + float(x) for x in self.solver_config.qaoa_step_momentum_channels[step_idx]],
-                            device=device,
-                            dtype=v.dtype,
-                        ).view(1, -1)
+                mom_vecs = qt.get("mom_vecs", [])
+                mom_vec = mom_vecs[step_idx] if step_idx < len(mom_vecs) else None
+                if prev_v is not None and (abs(mom) > 1e-7 or mom_vec is not None):
+                    if mom_vec is not None:
                         v_step = torch.addcmul(v, v - prev_v, mom_vec, value=1.0)
                     else:
                         v_step = (1.0 + mom) * v - mom * prev_v
                 else:
                     v_step = v
 
-                if (
-                    prev2_v is not None
-                    and prev_v is not None
-                    and step_idx < len(self.solver_config.qaoa_step_accel_channels)
-                    and len(self.solver_config.qaoa_step_accel_channels[step_idx]) == self.latent_dim
-                ):
-                    acc_vec = torch.tensor(
-                        self.solver_config.qaoa_step_accel_channels[step_idx],
-                        device=device,
-                        dtype=v.dtype,
-                    ).view(1, -1)
+                acc_vecs = qt.get("acc_vecs", [])
+                acc_vec = acc_vecs[step_idx] if step_idx < len(acc_vecs) else None
+                if prev2_v is not None and prev_v is not None and acc_vec is not None:
                     v_step = torch.addcmul(v_step, v - 2.0 * prev_v + prev2_v, acc_vec, value=1.0)
 
                 dt_scale = 1.0
@@ -928,46 +1027,29 @@ class OptimizedLatDitRunner:
             prev2_v = prev_v
             prev_v = v
             prev_dt = dt
-            if (
-                use_qaoa
-                and step_idx < len(self.solver_config.qaoa_step_channel_scales)
-                and len(self.solver_config.qaoa_step_channel_scales[step_idx]) == self.latent_dim
-            ):
-                ch_vec = torch.tensor(
-                    self.solver_config.qaoa_step_channel_scales[step_idx],
-                    device=device,
-                    dtype=xt.dtype,
-                ).view(1, -1)
+            step_ch_vecs = qt.get("step_ch_vecs", [])
+            ch_vec = step_ch_vecs[step_idx] if (use_qaoa and step_idx < len(step_ch_vecs)) else None
+            if ch_vec is not None:
                 xt = torch.addcmul(xt, v_step, ch_vec, value=-dt_eff)
             else:
                 xt = xt - dt_eff * v_step
 
         # Optional QAOA 16x16 cross-channel linear readout mixer + per-channel scale/bias + Kerr cubic term
-        if use_qaoa and len(self.solver_config.qaoa_channel_mixer) == self.latent_dim:
-            mat = torch.tensor(
-                self.solver_config.qaoa_channel_mixer, device=device, dtype=xt.dtype
-            )
-            xt = xt @ mat.T
-        if use_qaoa and len(self.solver_config.qaoa_channel_scale) == self.latent_dim:
-            ch_s = torch.tensor(
-                self.solver_config.qaoa_channel_scale, device=device, dtype=torch.float32
-            ).view(1, -1)
-            ch_b = torch.tensor(
-                self.solver_config.qaoa_channel_bias, device=device, dtype=torch.float32
-            ).view(1, -1)
-            xt = xt * ch_s + ch_b
+        ch_mixer_t = qt.get("ch_mixer_t")
+        if ch_mixer_t is not None:
+            xt = xt @ ch_mixer_t
+        ch_scale = qt.get("ch_scale")
+        ch_bias = qt.get("ch_bias")
+        if ch_scale is not None and ch_bias is not None:
+            xt = xt * ch_scale + ch_bias
         if rk_corr is not None:
             xt = xt + rk_corr
-        if use_qaoa and len(self.solver_config.qaoa_kerr_scales) == self.latent_dim:
-            k_vec = torch.tensor(
-                self.solver_config.qaoa_kerr_scales, device=device, dtype=xt.dtype
-            ).view(1, -1)
-            xt = torch.addcmul(xt, xt * xt * xt, k_vec, value=1.0)
+        kerr_vec = qt.get("kerr_vec")
+        if kerr_vec is not None:
+            xt = torch.addcmul(xt, xt * xt * xt, kerr_vec, value=1.0)
 
         # Unpermute back to original vox_idxs order and denormalize once
         xt_orig = xt[geom["up_widx"]]
-        mean = self.core.mean.view(1, -1).to(device=device, dtype=torch.float32)
-        std = self.core.std.view(1, -1).to(device=device, dtype=torch.float32)
-        xt_denorm = (xt_orig * std + mean) * self.latent_scale
+        xt_denorm = (xt_orig * self._std_f32 + self._mean_f32) * self.latent_scale
 
         return [xt_denorm[lay] for lay in geom["layout"]]

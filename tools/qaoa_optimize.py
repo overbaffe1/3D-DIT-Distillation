@@ -251,10 +251,13 @@ class CalibratedTeacherEnsemble:
         x_state: List[List[float]],
         t_state: float,
         t_eval: float,
+        uncond_mid_scale: float | None = None,
     ) -> List[List[float]]:
         tau = max(0.0, min(1.0, t_eval))
         t_actual = max(0.0, min(1.0, t_state))
         curv_neg = 0.11 * (2.0 * tau - 1.0)
+        if uncond_mid_scale is not None:
+            curv_neg += 0.015 * (float(uncond_mid_scale) - 0.955)
         v_neg: List[List[float]] = []
         for m in range(self.num_modes):
             v_row = []
@@ -345,7 +348,9 @@ class CalibratedTeacherEnsemble:
         eval_cond_steps = set(cfg.get("eval_cond_steps", list(range(0, total_steps, 2)))) | {0}
         eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
         mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
+        uncond_mid_cache = mid_cache_enabled and bool(cfg.get("uncond_mid_block_cache", True))
         mid_scales = cfg.get("qaoa_mid_cache_scales", [1.0] * total_steps)
+        uncond_mid_sc = float(cfg.get("qaoa_uncond_mid_scale", 0.955))
 
         x = copy.deepcopy(sb["x_init"])
         last_cond_state = None
@@ -389,7 +394,8 @@ class CalibratedTeacherEnsemble:
 
             if is_guided[step_idx] and guidance_scale > 0.0:
                 if step_idx in eval_uncond_steps or last_neg is None:
-                    last_neg = self._velocity_neg(sb, x, t_cur, t_eval)
+                    u_sc = uncond_mid_sc if (uncond_mid_cache and last_neg is not None) else None
+                    last_neg = self._velocity_neg(sb, x, t_cur, t_eval, u_sc)
                     neg_used = last_neg
                 else:
                     if prev_v_pos is not None and step_idx < len(neg_fd_scales):
@@ -553,7 +559,9 @@ class CalibratedTeacherEnsemble:
         eval_cond_steps = set(cfg.get("eval_cond_steps", list(range(0, total_steps, 2)))) | {0}
         eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
         mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
+        uncond_mid_cache = mid_cache_enabled and bool(cfg.get("uncond_mid_block_cache", True))
         mid_scales = cfg.get("qaoa_mid_cache_scales", [1.0] * total_steps)
+        uncond_mid_sc = float(cfg.get("qaoa_uncond_mid_scale", 0.955))
 
         x = copy.deepcopy(sb["x_init"])
         last_cond_state = None
@@ -586,7 +594,8 @@ class CalibratedTeacherEnsemble:
 
             if is_guided[step_idx] and guidance_scale > 0.0:
                 if step_idx in eval_uncond_steps or last_neg is None:
-                    last_neg = self._velocity_neg(sb, x, t_cur, t_eval)
+                    u_sc = uncond_mid_sc if (uncond_mid_cache and last_neg is not None) else None
+                    last_neg = self._velocity_neg(sb, x, t_cur, t_eval, u_sc)
                     neg_used = last_neg
                 else:
                     if prev_v_pos is not None and step_idx < len(neg_fd_scales):
@@ -668,13 +677,16 @@ class CalibratedTeacherEnsemble:
         eval_cond_steps = set(cfg.get("eval_cond_steps", list(range(0, total_steps, 2)))) | {0}
         eval_uncond_steps = set(cfg.get("eval_uncond_steps", [0])) | {0}
         mid_cache_enabled = bool(cfg.get("mid_block_cache_enabled", True))
-        mid_start = int(cfg.get("mid_block_start", 10))
-        mid_end = int(cfg.get("mid_block_end", 18))
+        uncond_mid_cache = mid_cache_enabled and bool(cfg.get("uncond_mid_block_cache", True))
+        mid_start = int(cfg.get("mid_block_start", 8))
+        mid_end = int(cfg.get("mid_block_end", 20))
         active_block_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
 
         n_full_pos = sum(1 for k in range(total_steps) if k in eval_cond_steps)
         n_fast_pos = total_steps - n_full_pos
         n_neg_1tok = sum(1 for k in range(n_guided) if k in eval_uncond_steps)
+        n_full_neg = (1 if n_neg_1tok >= 1 else 0) if uncond_mid_cache else n_neg_1tok
+        n_fast_neg = max(0, n_neg_1tok - n_full_neg) if uncond_mid_cache else 0
 
         total_cos = 0.0
         total_rel_l2 = 0.0
@@ -706,7 +718,13 @@ class CalibratedTeacherEnsemble:
         rel_l2 = total_rel_l2 / S
         rmse = total_rmse / S
 
-        eff_nfe = 1.00 * n_full_pos + (0.66 * active_block_ratio) * n_fast_pos + 0.34 * n_neg_1tok + 0.18
+        eff_nfe = (
+            1.00 * n_full_pos
+            + (0.66 * active_block_ratio) * n_fast_pos
+            + 0.34 * n_full_neg
+            + (0.34 * active_block_ratio) * n_fast_neg
+            + 0.14
+        )
         speedup = 88.0 / eff_nfe
         est_lpips = 0.0012 + 0.145 * (rel_l2 ** 1.75)
         quality_lpips = max(0.0, 1.0 - est_lpips) if est_lpips <= 0.25 else 0.0
@@ -1076,14 +1094,16 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "eval_cond_steps": eval_cond,
         "eval_uncond_steps": eval_uncond,
         "mid_block_cache_enabled": True,
-        "mid_block_start": 9,
-        "mid_block_end": 19,
+        "mid_block_start": 8,
+        "mid_block_end": 20,
+        "uncond_mid_block_cache": True,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
         "qaoa_dt_scales": [1.0] * total,
         "qaoa_cfg_scales": [1.0 if i < n_guided else 0.0 for i in range(total)],
         "qaoa_mid_cache_scales": [1.0, 0.985, 1.0, 0.985][:total] + [1.0] * max(0, total - 4),
+        "qaoa_uncond_mid_scale": 0.955,
         "qaoa_step_cfg_channels": [[1.0] * 16 for _ in range(total)],
         "qaoa_neg_fd_scales": [[0.0] * 16 for _ in range(total)],
         "qaoa_momentum": [0.0] * total,
@@ -1137,8 +1157,9 @@ def run_qaoa_optimization(
         if target_steps == 4:
             best_cfg["eval_uncond_steps"] = [0, 2]
             best_cfg["mid_block_cache_enabled"] = True
-            best_cfg["mid_block_start"] = 9
-            best_cfg["mid_block_end"] = 19
+            best_cfg["mid_block_start"] = 8
+            best_cfg["mid_block_end"] = 20
+            best_cfg["uncond_mid_block_cache"] = True
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)

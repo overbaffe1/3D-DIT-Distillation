@@ -3100,12 +3100,14 @@
     -1.0186503132985346e-05
   ],
   "mid_block_cache_enabled": true,
-  "mid_block_start": 9,
-  "mid_block_end": 19,
+  "mid_block_start": 8,
+  "mid_block_end": 20,
   "qaoa_mid_cache_scales": [
     1.0,
     0.9852,
     1.0,
     0.9852
-  ]
+  ],
+  "uncond_mid_block_cache": true,
+  "qaoa_uncond_mid_scale": 0.955
 }
