@@ -29,6 +29,7 @@ class SolverConfig:
     eval_cond_steps: List[int] = field(default_factory=lambda: [0, 2])
     eval_uncond_steps: List[int] = field(default_factory=lambda: [0, 2])
     mid_block_cache_enabled: bool = True
+    deep_block_start: int = 2
     mid_block_start: int = 8
     mid_block_end: int = 23
     uncond_mid_block_cache: bool = True

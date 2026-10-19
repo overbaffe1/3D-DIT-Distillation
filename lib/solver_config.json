@@ -3110,5 +3110,6 @@
   ],
   "uncond_mid_block_cache": true,
   "qaoa_uncond_mid_scale": 0.955,
-  "single_dino_cond_pass": false
+  "single_dino_cond_pass": false,
+  "deep_block_start": 2
 }
