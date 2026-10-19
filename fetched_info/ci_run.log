@@ -14,27 +14,18 @@ weights_dir: None
 errors: []
 notes: ['missing non-empty weights/; eval will use organizer lat_dit weights']
 
-Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (54.2 KB)
+Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (54.8 KB)
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=['missing non-empty weights/; eval will use organizer lat_dit weights']
    [PASS] Submission format verified.
 2. Testing Solution class contract & numerical equivalence...
    pos_pred max_abs_diff=1.19e-06, cos_sim=0.99999982
-   neg_pred (1-token vs 4101-token) max_abs_diff=3.81e-06, cos_sim=1.00000036
-   generate() output shape=(512, 16), metadata={'generator_class': 'solution.Solution', 'inputs': {'sampling': {'guidance_scale': 2.5, 'cfg_range': [0.5, 1.0], 'rescale_t': 3.0, 'num_inference_steps': 4}, 'sampling_kwargs': {}, 'batch_size': 1, 'num_voxels': [512], 'generator_seed': 123}, 'elapsed_seconds': 13.92105374900001, 'status': 'ok'}
-   [PASS] PyTorch pipeline & numerical equivalence verified.
-Streaming flow.blocks.0.* real pretrained weights sequentially...
-Loaded 3 real pretrained tensors from flow.blocks.0 in 12.3s
-[Equivalence] pos_pred: max_diff=8.94e-07, cos=1.00000024, time=3.313s -> 3.367s
-[Equivalence] neg_pred (1-token vs 4101-token): max_diff=2.62e-06, cos=0.99999982, time=3.328s -> 0.411s (8.10x faster)
-
-Running 50-step baseline teacher trajectory...
-Teacher 50-step finished in 9.10s
-  euler_20_naive                    : rel_l2=0.7075, cos=0.725523, speedup=2.38x
-  piecewise_euler_20_exact          : rel_l2=0.6871, cos=0.729300, speedup=2.56x
-  piecewise_ab2_20_exact            : rel_l2=0.6871, cos=0.729300, speedup=2.57x
-  piecewise_ab2_16_stride2_reuse    : rel_l2=0.4417, cos=0.917918, speedup=2.94x
-  piecewise_ab2_16_stride2_extrap   : rel_l2=0.5011, cos=0.866116, speedup=3.10x
-  piecewise_ab2_14_stride2_extrap   : rel_l2=0.8952, cos=0.532561, speedup=3.42x
-  piecewise_ab2_12_stride2_extrap   : rel_l2=0.9129, cos=0.459434, speedup=3.82x
+   neg_pred (1-token vs 4101-token) max_abs_diff=1.82e+00, cos_sim=0.71320111
+Traceback (most recent call last):
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 175, in <module>
+    test_pytorch_pipeline()
+  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 154, in test_pytorch_pipeline
+    assert neg_cos > 0.9999, f"neg_pred cosine similarity too low: {neg_cos}"
+           ^^^^^^^^^^^^^^^^
+AssertionError: neg_pred cosine similarity too low: 0.713201105594635
