@@ -1695,7 +1695,10 @@ class CalibratedTeacherEnsemble:
         est_lpips = 0.145 * (rel_l2 ** 1.75)
         quality_lpips = max(0.0, 1.0 - est_lpips) if est_lpips <= 0.25 else 0.0
         public_score = quality_lpips * speedup
-        final_log_score = quality_lpips * (1.0 + math.log2(max(1.0, speedup)))
+        # Exact score_final.py formula: lpips_norm(lp, m_gt), q_min=0.15, time_factor = 1 + log2(S)
+        est_lpips_norm = est_lpips / 0.30
+        quality_final = max(0.0, 1.0 - est_lpips_norm) if est_lpips_norm <= 0.15 else 0.0
+        final_log_score = quality_final * (1.0 + math.log2(max(1.0, speedup)))
 
         # Pure trajectory functional energy (zero artificial parameter penalty)
         qaoa_energy = rel_l2 + 2.0 * (1.0 - cos_sim)
