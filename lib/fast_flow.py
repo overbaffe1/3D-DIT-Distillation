@@ -49,6 +49,7 @@ from lib.fast_kernels import (
 from lib.fast_sampler import (
     SolverConfig,
     build_schedule,
+    compute_cab_nsr_step_ratio,
     compute_flow_unipc_bh2_scale,
     compute_stork2_beta,
     get_qaoa_eval_timesteps,
@@ -165,6 +166,9 @@ class OptimizedLatDitRunner:
             if block.rms:
                 block.qk_norm._q_scale_cast = block.qk_norm.q_scale.detach().to(device=device, dtype=target_dtype).contiguous()
                 block.qk_norm._k_scale_cast = block.qk_norm.k_scale.detach().to(device=device, dtype=target_dtype).contiguous()
+                block.qk_norm._q_scale_cast._qk_stacked = torch.stack(
+                    [block.qk_norm._q_scale_cast, block.qk_norm._k_scale_cast], dim=0
+                ).unsqueeze(0).contiguous()
                 if block.cond:
                     block.cond_qk_norm._q_scale_cast = (
                         block.cond_qk_norm.q_scale.detach().to(device=device, dtype=target_dtype).contiguous()
@@ -172,6 +176,9 @@ class OptimizedLatDitRunner:
                     block.cond_qk_norm._k_scale_cast = (
                         block.cond_qk_norm.k_scale.detach().to(device=device, dtype=target_dtype).contiguous()
                     )
+                    block.cond_qk_norm._q_scale_cast._qk_stacked = torch.stack(
+                        [block.cond_qk_norm._q_scale_cast, block.cond_qk_norm._k_scale_cast], dim=0
+                    ).unsqueeze(0).unsqueeze(0).contiguous()
             # Pre-slice weights for 1-token unconditional condensation:
             # In to_qkv_cross ([3*D, D]), slice [D:3*D] is K,V only (skipping Q on N voxels!)
             if block.cond:
@@ -824,6 +831,8 @@ class OptimizedLatDitRunner:
         pos_qmc_stride = int(getattr(self.solver_config, "hilbert_qmc_pos_stride", 4))
         nc_dino_stride = int(getattr(self.solver_config, "noncond_dino_qmc_stride", 4))
         use_b7_fuse = bool(getattr(self.solver_config, "fused_b7_gate_ln_cond", True))
+        use_dicache_dcta = bool(getattr(self.solver_config, "dicache_dcta_probe", True))
+        pab_nc_stride = int(getattr(self.solver_config, "pab_noncond_cr_stride", 2))
         dmd_lambda = float(getattr(self.solver_config, "dmd_exp_decay_lambda", 0.015))
         use_1tok_collapse = bool(getattr(self.solver_config, "fused_1tok_linear_collapse", True))
         eff_mid_scale = (
@@ -1058,6 +1067,14 @@ class OptimizedLatDitRunner:
         )
         pos_cr_sum: Optional[torch.Tensor] = torch.empty_like(x) if use_fused_cr_accum else None
         pos_kv_x_list: Optional[List[Tuple[torch.Tensor, torch.Tensor, int]]] = [] if record_pos_carrier else None
+        use_pab_nc_cr = (
+            (not uncond)
+            and (pab_nc_stride > 1)
+            and return_mid_delta
+            and (not need_full_kv_cc)
+            and (cached_cond_block7 is None)
+        )
+        prev_nc_cr_out: Optional[torch.Tensor] = None
 
         for b_idx, block in enumerate(self.flow.blocks):
             if can_mid_cache:
@@ -1083,6 +1100,13 @@ class OptimizedLatDitRunner:
 
             s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = block_gates[b_idx]
             fwd_idx, bwd_idx, cu_seqlens, max_len = order_caches[block.order_idx]
+            will_reuse_nc_cr = (
+                use_pab_nc_cr
+                and (not block.cond)
+                and ((b_idx - self.cond_depth) % pab_nc_stride != 0)
+                and (b_idx < num_blocks - 2)
+                and (prev_nc_cr_out is not None)
+            )
 
             # --- 1. Windowed Self-Attention on 3D Voxels ---
             h_x_precomputed: Optional[torch.Tensor] = None
@@ -1106,7 +1130,7 @@ class OptimizedLatDitRunner:
                 )
                 attn_out = flash_varlen_qkvpacked_already_sorted(qkv_sorted, bwd_idx, cu_seqlens, max_len)
                 h = block.to_out(attn_out.reshape(N, D))
-                if (b_idx > 0 or cached_mid_delta is None) and not use_1tok_uncond:
+                if (b_idx > 0 or cached_mid_delta is None) and (not use_1tok_uncond) and (not will_reuse_nc_cr):
                     # Fused MSA Gate-Add + Cross-Attention LayerNorm & AdaLN Modulation in 1 Triton kernel!
                     x, h_x_precomputed = fast_gate_add_and_modulate(
                         x, h, sizes, g_msa, s_cr, sh_cr, use_triton=use_triton
@@ -1136,6 +1160,7 @@ class OptimizedLatDitRunner:
                     ):
                         # FreqCa CRF (NeurIPS 2026) + DBCache-FoCa Heun Calibrator (vipshop/cache-dit 2026)
                         # + BaryCache/L2P-Cache 2-Anchor Extrapolation (arXiv:2608.28670 / CVPR 2026)
+                        # + DiCache Dynamic Cache Trajectory Alignment (ICLR 2026, arXiv:2508.17356)
                         # + SenCache Sensitivity Scaling (CVPR 2026) + Prony/DMD Exponential Decay on fast pos steps (1, 3):
                         cur_fn_res = x - x_patchify
                         crf_base = self._last_pos_crf_after_b0_msa
@@ -1147,6 +1172,18 @@ class OptimizedLatDitRunner:
                             and crf_s0.shape == (N, D)
                         ):
                             eff_beta = bary_beta * eff_mid_scale if use_sencache else bary_beta
+                            if (
+                                use_dicache_dcta
+                                and getattr(self, "_last_b0_fn_res", None) is not None
+                                and getattr(self, "_last_b0_fn_res_step0", None) is not None
+                                and self._last_b0_fn_res is not self._last_b0_fn_res_step0
+                                and self._last_b0_fn_res.shape == (N, D)
+                                and self._last_b0_fn_res_step0.shape == (N, D)
+                            ):
+                                num_l1 = float((cur_fn_res - self._last_b0_fn_res).abs().mean().item())
+                                den_l1 = float((self._last_b0_fn_res - self._last_b0_fn_res_step0).abs().mean().item())
+                                dcta_ratio = min(1.35, max(0.65, num_l1 / max(1e-6, den_l1)))
+                                eff_beta = eff_beta * dcta_ratio
                             x = torch.add(x, crf_base, alpha=eff_mid_scale * (1.0 + eff_beta))
                             x = torch.add(x, crf_s0, alpha=-eff_mid_scale * eff_beta)
                         else:
@@ -1538,6 +1575,12 @@ class OptimizedLatDitRunner:
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
                     )
                     cr_out_for_x = block.to_out_cross(h_x_out.reshape(N, D))
+                elif will_reuse_nc_cr and prev_nc_cr_out is not None:
+                    # PAB (ICLR 2025, arXiv:2408.12558) + DuCa (ToCa-v2) Non-Conditioning Cross-Attention Broadcast:
+                    # In frozen-context blocks 8..23 (where `ln_cond_after_7` is static), odd intermediate blocks
+                    # reuse the adjacent block's cross-attention output with the current block's exact gate `g_cr[b_idx]`,
+                    # bypassing LayerNorm+Modulate(x), to_q_cross, cond_to_kv_cross, FlashCrossAttn, and to_out_cross!
+                    cr_out_for_x = prev_nc_cr_out
                 else:
                     L_nc = ln_cond_after_7.shape[1]
                     h_cond_cr = fast_modulate_preln_cond(ln_cond_after_7, cs_cr, csh_cr)
@@ -1561,6 +1604,8 @@ class OptimizedLatDitRunner:
                         q_x, q_seqlens, q_maxlen, kv_cc, kv_seq_nc, kv_max_nc
                     )
                     cr_out_for_x = block.to_out_cross(h_x_out.reshape(N, D))
+                    if use_pab_nc_cr:
+                        prev_nc_cr_out = cr_out_for_x
 
             if record_pos_carrier and not use_fused_cr_accum:
                 g_cr_2d = getattr(g_cr, "_g_2d", g_cr.view(1, -1))
@@ -1845,6 +1890,8 @@ class OptimizedLatDitRunner:
         fc_hf_boost = float(getattr(self.solver_config, "fastercache_hf_boost", 0.035))
         use_cayley_lie = bool(getattr(self.solver_config, "cayley_lie_orthogonal_step", True))
         use_flow_unipc = bool(getattr(self.solver_config, "flow_unipc_bh2_integrator", True))
+        use_cab_defect = bool(getattr(self.solver_config, "cab_extrapolation_defect", True))
+        cab_gamma = float(getattr(self.solver_config, "cab_defect_gamma", 0.022))
         prev_v_pos_step: Optional[torch.Tensor] = None
         prev2_v_pos_step: Optional[torch.Tensor] = None
         num_blocks = len(self.flow.blocks)
@@ -2119,6 +2166,24 @@ class OptimizedLatDitRunner:
                                 dv_cur - dv_prev,
                                 dir_gate,
                                 value=0.5 * hermite_sigma * hermite_sigma,
+                            )
+                        if use_cab_defect and cab_gamma > 0.0 and step_idx >= 2:
+                            # CAB Extrapolation-Defect Correction in Noise-to-Signal Ratio (NSR) Coordinates
+                            # (Roy & Nair, arXiv:2605.16736v2, May 2026):
+                            # Feed back the Lagrange extrapolation defect `v - ((1 + r_{i-1})*v_{i-1} - r_{i-1}*v_{i-2})`
+                            # on the rectified rho_t = t / (1 - t) grid with Padé resolvent stabilization!
+                            r_cab = compute_cab_nsr_step_ratio(
+                                float(t_list[step_idx - 2]), float(t_list[step_idx - 1]), t_val
+                            )
+                            cab_defect = v - (1.0 + r_cab) * prev_v + r_cab * prev2_v
+                            v_norm_cab = (v * v).sum().clamp_min(1e-6)
+                            cab_res = 1.0 / (1.0 + pade_eta * ((cab_defect * cab_defect).sum() / v_norm_cab))
+                            cab_phi2 = compute_flow_unipc_bh2_scale(t_val, t_next) if use_flow_unipc else 1.0
+                            v_step = torch.addcmul(
+                                v_step,
+                                cab_defect,
+                                cab_res,
+                                value=cab_gamma * cab_phi2 * (r_cab / (1.0 + r_cab)),
                             )
 
                 if (

@@ -83,6 +83,11 @@ class SolverConfig:
     fused_cr_carrier_accum: bool = True
     noncond_dino_qmc_stride: int = 4
     fused_b7_gate_ln_cond: bool = True
+    cab_extrapolation_defect: bool = True
+    cab_defect_gamma: float = 0.022
+    dicache_dcta_probe: bool = True
+    pab_noncond_cr_stride: int = 2
+    prestacked_qknorm_scale: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -211,6 +216,26 @@ def compute_flow_unipc_bh2_scale(t_cur: float, t_next: float) -> float:
         return 1.0 - h / 3.0
     phi2_scale = 2.0 * (math.expm1(-h) + h) / (h * h)
     return float(max(0.35, min(1.0, phi2_scale)))
+
+
+def compute_cab_nsr_step_ratio(t_prev: float, t_cur: float, t_next: float) -> float:
+    """
+    Noise-to-Signal Ratio (NSR) rectified step ratio r_i = (rho_{t_cur} - rho_{t_next}) / (rho_{t_prev} - rho_{t_cur})
+    where rho_t = sigma_t / s_t = t / (1 - t) (CAB: Corrected Adams-Bashforth, Roy & Nair, arXiv:2605.16736v2).
+    """
+    eps = 1e-2
+    tp = min(1.0 - eps, max(eps, float(t_prev)))
+    tc = min(1.0 - eps, max(eps, float(t_cur)))
+    tn = min(1.0 - eps, max(eps, float(t_next)))
+    if tp <= tc or tc <= tn:
+        return 0.75
+    rho_prev = tp / (1.0 - tp)
+    rho_cur = tc / (1.0 - tc)
+    rho_next = tn / (1.0 - tn)
+    h_prev = max(1e-6, rho_prev - rho_cur)
+    h_cur = max(1e-6, rho_cur - rho_next)
+    return float(min(1.5, max(0.2, h_cur / h_prev)))
+
 
 
 def build_schedule(

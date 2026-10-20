@@ -3159,5 +3159,10 @@
   "batched_gate_modulate_stack": true,
   "fused_cr_carrier_accum": true,
   "noncond_dino_qmc_stride": 4,
-  "fused_b7_gate_ln_cond": true
+  "fused_b7_gate_ln_cond": true,
+  "cab_extrapolation_defect": true,
+  "cab_defect_gamma": 0.022,
+  "dicache_dcta_probe": true,
+  "pab_noncond_cr_stride": 2,
+  "prestacked_qknorm_scale": true
 }

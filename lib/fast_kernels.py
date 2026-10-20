@@ -1003,7 +1003,14 @@ def apply_rope_cached_3d(
 ) -> torch.Tensor:
     """Apply 3D RoPE using precomputed (cos_vox, sin_vox) [N, 1, 3, 16] or 1D table [64, 16] to tokens [N, (2,) H, 96]."""
     if cos_vox.ndim == 2 and coords is not None:
-        cos_vox, sin_vox = lookup_rope_3d(coords[:, 1:], cos_vox, sin_vox)
+        cached_cs = getattr(coords, "_cached_cos_sin_3d", None)
+        if cached_cs is None:
+            cached_cs = lookup_rope_3d(coords[:, 1:], cos_vox, sin_vox)
+            try:
+                coords._cached_cos_sin_3d = cached_cs
+            except Exception:
+                pass
+        cos_vox, sin_vox = cached_cs
     orig_shape = tokens.shape
     Q = cos_vox.shape[-1]
     if tokens.ndim == 4:
@@ -1391,7 +1398,9 @@ def fused_qknorm_rope2d_cond_inplace(
         return qkv_cond
 
     if not qkv_cond.is_cuda:
-        qk_scale = torch.stack([q_scale.to(qkv_cond.dtype), k_scale.to(qkv_cond.dtype)], dim=0).unsqueeze(0).unsqueeze(0)
+        qk_scale = getattr(q_scale, "_qk_stacked", None)
+        if qk_scale is None or qk_scale.dtype != qkv_cond.dtype:
+            qk_scale = torch.stack([q_scale.to(qkv_cond.dtype), k_scale.to(qkv_cond.dtype)], dim=0).unsqueeze(0).unsqueeze(0)
         qk = fast_rms_norm(qkv_cond[:, :, :2]) * qk_scale
         qkv_cond[:, :5, :2] = qk[:, :5]
         qkv_cond[:, 5:, :2] = apply_rope_cached_2d(qk[:, 5:], cos_cond_2d, sin_cond_2d)
@@ -1448,7 +1457,9 @@ def fused_qknorm_rope3d_gather(
         return out_qkv
 
     if not qkv.is_cuda:
-        qk_scale = torch.stack([q_scale.to(qkv.dtype), k_scale.to(qkv.dtype)], dim=0).unsqueeze(0)
+        qk_scale = getattr(q_scale, "_qk_stacked", None)
+        if qk_scale is None or qk_scale.dtype != qkv.dtype:
+            qk_scale = torch.stack([q_scale.to(qkv.dtype), k_scale.to(qkv.dtype)], dim=0).unsqueeze(0)
         qk = apply_rope_cached_3d(fast_rms_norm(qkv[:, :2]) * qk_scale, cos_vox, sin_vox, coords=coords)
         qkv[:, :2] = qk
         return qkv[fwd_indices]
@@ -1490,7 +1501,13 @@ def flash_varlen_qkvpacked_already_sorted(
             v_s.unsqueeze(0).transpose(1, 2),
         ).squeeze(0).transpose(0, 1)
         return out_single[bwd_indices]
-    seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    seqlens = getattr(cu_seqlens, "_seqlens_list", None)
+    if seqlens is None:
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        try:
+            cu_seqlens._seqlens_list = seqlens
+        except Exception:
+            pass
     outs = []
     start = 0
     for sl in seqlens:
