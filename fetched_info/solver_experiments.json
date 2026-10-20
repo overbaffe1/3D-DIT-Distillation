@@ -1,93 +1,93 @@
 {
   "equivalence": {
-    "pos_max_abs_diff": 1.0132789611816406e-06,
-    "pos_cosine_sim": 1.000000238418579,
-    "neg_1token_max_abs_diff": 2.5033950805664062e-06,
-    "neg_1token_cosine_sim": 0.9999999403953552,
-    "ref_pos_sec": 3.3238137559999927,
-    "fast_pos_sec": 3.373663668000006,
-    "ref_neg_sec": 3.36135748800001,
-    "fast_neg_1token_sec": 0.3329321549999804,
-    "neg_speedup": 10.096223622498126
+    "pos_max_abs_diff": 1.1920928955078125e-06,
+    "pos_cosine_sim": 1.0000003576278687,
+    "neg_1token_max_abs_diff": 4.887580871582031e-06,
+    "neg_1token_cosine_sim": 0.9999997615814209,
+    "ref_pos_sec": 1.7554614930000128,
+    "fast_pos_sec": 1.793545107,
+    "ref_neg_sec": 1.7749846419999926,
+    "fast_neg_1token_sec": 0.22035217499998794,
+    "neg_speedup": 8.055217253925857
   },
-  "teacher_time_sec": 1.4986489389999633,
+  "teacher_time_sec": 0.9093657159999964,
   "solvers": {
     "euler_20_naive": {
       "steps": 20,
       "solver_type": "euler",
       "cfg_stride": 1,
       "cfg_cache_mode": "exact",
-      "rel_l2": 0.2772893011569977,
-      "cosine_sim": 0.9662379622459412,
-      "mae": 0.9926934838294983,
-      "time_sec": 0.6355987430000027,
-      "speedup_vs_teacher": 2.357853843332659
+      "rel_l2": 0.2777038514614105,
+      "cosine_sim": 0.9661310911178589,
+      "mae": 0.9941271543502808,
+      "time_sec": 0.3750538600000084,
+      "speedup_vs_teacher": 2.424627001572457
     },
     "piecewise_euler_20_exact": {
       "steps": 20,
       "solver_type": "piecewise_euler",
       "cfg_stride": 1,
       "cfg_cache_mode": "exact",
-      "rel_l2": 0.24935850501060486,
-      "cosine_sim": 0.9684645533561707,
-      "mae": 0.9870517253875732,
-      "time_sec": 0.5763428440000098,
-      "speedup_vs_teacher": 2.600273352227026
+      "rel_l2": 0.2498018443584442,
+      "cosine_sim": 0.9683489203453064,
+      "mae": 0.9887987375259399,
+      "time_sec": 0.34384338400002434,
+      "speedup_vs_teacher": 2.644709069056661
     },
     "piecewise_ab2_20_exact": {
       "steps": 20,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 1,
       "cfg_cache_mode": "exact",
-      "rel_l2": 0.24935850501060486,
-      "cosine_sim": 0.9684645533561707,
-      "mae": 0.9870517253875732,
-      "time_sec": 0.5825611390000063,
-      "speedup_vs_teacher": 2.5725178675193905
+      "rel_l2": 0.2498018443584442,
+      "cosine_sim": 0.9683489203453064,
+      "mae": 0.9887987375259399,
+      "time_sec": 0.3160975909999877,
+      "speedup_vs_teacher": 2.8768511431016623
     },
     "piecewise_ab2_16_stride2_reuse": {
       "steps": 16,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_reuse",
-      "rel_l2": 0.26407134532928467,
-      "cosine_sim": 0.965244472026825,
-      "mae": 1.1173566579818726,
-      "time_sec": 0.5857141150000302,
-      "speedup_vs_teacher": 2.5586696660023054
+      "rel_l2": 0.26478835940361023,
+      "cosine_sim": 0.9650383591651917,
+      "mae": 1.119916558265686,
+      "time_sec": 0.3366421510000066,
+      "speedup_vs_teacher": 2.7012829893662915
     },
     "piecewise_ab2_16_stride2_extrap": {
       "steps": 16,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.30898064374923706,
-      "cosine_sim": 0.9513807892799377,
-      "mae": 1.2831041812896729,
-      "time_sec": 0.5066928400000279,
-      "speedup_vs_teacher": 2.9577069591113245
+      "rel_l2": 0.3099210560321808,
+      "cosine_sim": 0.9510647058486938,
+      "mae": 1.2862427234649658,
+      "time_sec": 0.2756357479999849,
+      "speedup_vs_teacher": 3.2991573937646366
     },
     "piecewise_ab2_14_stride2_extrap": {
       "steps": 14,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.43843066692352295,
-      "cosine_sim": 0.9002870321273804,
-      "mae": 1.8996506929397583,
-      "time_sec": 0.4963955200000214,
-      "speedup_vs_teacher": 3.019062176467464
+      "rel_l2": 0.4396924078464508,
+      "cosine_sim": 0.8997184038162231,
+      "mae": 1.904915690422058,
+      "time_sec": 0.27712388300000157,
+      "speedup_vs_teacher": 3.281441159656352
     },
     "piecewise_ab2_12_stride2_extrap": {
       "steps": 12,
       "solver_type": "piecewise_ab2",
       "cfg_stride": 2,
       "cfg_cache_mode": "delta_extrapolate",
-      "rel_l2": 0.33512863516807556,
-      "cosine_sim": 0.9441641569137573,
-      "mae": 1.3257100582122803,
-      "time_sec": 0.48015255599995044,
-      "speedup_vs_teacher": 3.121193296324175
+      "rel_l2": 0.3367393910884857,
+      "cosine_sim": 0.9436473846435547,
+      "mae": 1.3319250345230103,
+      "time_sec": 0.27885955600001466,
+      "speedup_vs_teacher": 3.261016868290318
     }
   }
 }
