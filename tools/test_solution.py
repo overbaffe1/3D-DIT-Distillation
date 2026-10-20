@@ -193,6 +193,8 @@ def test_pytorch_pipeline() -> None:
                 compute_arex_affine_defect,
                 compute_cab_nsr_step_ratio,
                 compute_postcache_rts_gain,
+                compute_racer_trust_shrinkage,
+                compute_spectral_cache_scale,
                 compute_stork4_rock4_weights,
             )
             r_cab = compute_cab_nsr_step_ratio(0.95, 0.72, 0.44)
@@ -203,6 +205,14 @@ def test_pytorch_pipeline() -> None:
             assert 0.10 <= rts_g <= 1.25
             arex_def, k_t_ax = compute_arex_affine_defect(0.72, 0.44)
             assert -0.35 <= arex_def <= 0.35 and -2.0 <= k_t_ax <= 2.0
+            racer_k = compute_racer_trust_shrinkage(0.08, 1.0, 2)
+            assert 0.15 <= racer_k <= 1.0
+            spec_s = compute_spectral_cache_scale(1.12, 1.0, 0.035)
+            assert 0.85 <= spec_s <= 1.15
+            assert sol_model.runner.solver_config.uncond_1tok_cond_ffn_stride == 2
+            assert sol_model.runner.solver_config.refadapt_cond_cr_stride == 2
+            assert sol_model.runner.solver_config.racer_disagreement_shrinkage is True
+            assert sol_model.runner.solver_config.spectral_norm_scaling is True
             # Test under bfloat16 autocast (mirrors `with stage_autocast("lat_dit", device):` in LatDitStage.run)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 g_ac = torch.Generator(device=device).manual_seed(123)

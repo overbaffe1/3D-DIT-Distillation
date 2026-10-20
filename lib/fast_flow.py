@@ -53,6 +53,8 @@ from lib.fast_sampler import (
     compute_cab_nsr_step_ratio,
     compute_flow_unipc_bh2_scale,
     compute_postcache_rts_gain,
+    compute_racer_trust_shrinkage,
+    compute_spectral_cache_scale,
     compute_stork2_beta,
     compute_stork4_rock4_weights,
     get_qaoa_eval_timesteps,
@@ -847,6 +849,11 @@ class OptimizedLatDitRunner:
         cond_kv_qmc_stride = int(getattr(self.solver_config, "cond_dino_kv_qmc_stride", 4))
         use_koopman_obs = bool(getattr(self.solver_config, "koopman_shallow_observer", True))
         koopman_gain = float(getattr(self.solver_config, "koopman_observer_gain", 0.035))
+        uncond_1tok_ffn_stride = int(getattr(self.solver_config, "uncond_1tok_cond_ffn_stride", 2))
+        cond_cr_stride = int(getattr(self.solver_config, "refadapt_cond_cr_stride", 2))
+        use_racer = bool(getattr(self.solver_config, "racer_disagreement_shrinkage", True))
+        use_spec_scale = bool(getattr(self.solver_config, "spectral_norm_scaling", True))
+        spec_gamma = float(getattr(self.solver_config, "spectral_norm_gamma", 0.035))
         dmd_lambda = float(getattr(self.solver_config, "dmd_exp_decay_lambda", 0.015))
         use_1tok_collapse = bool(getattr(self.solver_config, "fused_1tok_linear_collapse", True))
         eff_mid_scale = (
@@ -956,6 +963,9 @@ class OptimizedLatDitRunner:
                 and getattr(self, "_noncond_1tok_w_t", None) is not None
                 and "nc_cs_w" in tg
             )
+            use_1tok_ffn_stride = uncond_1tok_ffn_stride > 1
+            prev_1tok_rcr_proj: Optional[torch.Tensor] = None
+            prev_1tok_ffn_out: Optional[torch.Tensor] = None
             uncond_cr_sum: Optional[torch.Tensor] = None
             h_cond_msa_pre: Optional[torch.Tensor] = None
             for b_idx, block in enumerate(self.flow.blocks):
@@ -982,34 +992,67 @@ class OptimizedLatDitRunner:
                     cond, h_cond_cr = fast_gate_add_and_modulate_cond(
                         cond, cond_msa_out, cg_msa, cs_cr, csh_cr, use_triton=use_triton
                     )
-                    qo_w = getattr(block, "_cond_1tok_q_and_out_cr_w", None) if use_1tok_collapse else None
-                    if qo_w is not None:
-                        q_cc_flat, h_x_cross = (
-                            F.linear(
-                                h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
-                            )
-                            .view(2, 1, D)
-                            .unbind(0)
-                        )
-                        q_cc = q_cc_flat.view(1, H, HD)
+                    will_reuse_1tok_ffn = (
+                        use_1tok_ffn_stride
+                        and (b_idx > 0)
+                        and (b_idx < self.cond_depth - 1)
+                        and (b_idx % uncond_1tok_ffn_stride != 0)
+                        and (prev_1tok_rcr_proj is not None)
+                        and (prev_1tok_ffn_out is not None)
+                    )
+                    if will_reuse_1tok_ffn and prev_1tok_rcr_proj is not None and prev_1tok_ffn_out is not None:
+                        # SCR (arXiv:2609.29505) + HetCache (arXiv:2603.24260) 1-Token Odd-Block Reverse-Cross & FFN Reuse:
+                        # In odd intermediate conditioning blocks (1, 3, 5), compute exact 1-token forward `h_x_cross`
+                        # while reusing the previous even block's reverse cross-attn projection and 1-token FFN residual
+                        # modulated by exact current gates `cg_cr[b_idx]` and `cg_mlp[b_idx]`, bypassing 3 voxel FlashCrossAttn calls!
+                        c1_w = getattr(block, "_cond_1tok_cr_w", None) if use_1tok_collapse else None
+                        if c1_w is not None:
+                            h_x_cross = F.linear(h_cond_cr.view(1, D), c1_w, getattr(block, "_cond_1tok_cr_b", None))
+                        else:
+                            vc_w = getattr(block, "_cond_to_v_cross_slice_w", None)
+                            if vc_w is not None:
+                                v_cc = F.linear(
+                                    h_cond_cr, vc_w, getattr(block, "_cond_to_v_cross_slice_b", None)
+                                ).view(1, D)
+                            else:
+                                v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, D)[:, 2]
+                            h_x_cross = block.to_out_cross(v_cc)
+                        cond = fast_gate_add_cond(cond, prev_1tok_rcr_proj, cg_cr)
+                        cond_ffn_out = prev_1tok_ffn_out
                     else:
-                        q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
-                        h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
-                    kv_x, q_seq_use, q_max_use = self._last_pos_kv_x_list[b_idx]
-                    h_c_cross = flash_cross_attn(
-                        q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seq_use, q_max_use
-                    )
-                    cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
-                        cond,
-                        block.cond_to_out_cross(h_c_cross.view(1, 1, D)),
-                        cg_cr,
-                        cs_mlp,
-                        csh_mlp,
-                        use_triton=use_triton,
-                    )
-                    cond_ffn_out = block.cond_ffn1(
-                        fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)
-                    )
+                        qo_w = getattr(block, "_cond_1tok_q_and_out_cr_w", None) if use_1tok_collapse else None
+                        if qo_w is not None:
+                            q_cc_flat, h_x_cross = (
+                                F.linear(
+                                    h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
+                                )
+                                .view(2, 1, D)
+                                .unbind(0)
+                            )
+                            q_cc = q_cc_flat.view(1, H, HD)
+                        else:
+                            q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
+                            h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
+                        kv_x, q_seq_use, q_max_use = self._last_pos_kv_x_list[b_idx]
+                        h_c_cross = flash_cross_attn(
+                            q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seq_use, q_max_use
+                        )
+                        cond_rcr_proj = block.cond_to_out_cross(h_c_cross.view(1, 1, D))
+                        if use_1tok_ffn_stride:
+                            prev_1tok_rcr_proj = cond_rcr_proj
+                        cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
+                            cond,
+                            cond_rcr_proj,
+                            cg_cr,
+                            cs_mlp,
+                            csh_mlp,
+                            use_triton=use_triton,
+                        )
+                        cond_ffn_out = block.cond_ffn1(
+                            fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)
+                        )
+                        if use_1tok_ffn_stride:
+                            prev_1tok_ffn_out = cond_ffn_out
                     if use_interblock_fuse and (b_idx + 1 < self.cond_depth):
                         cs_msa_nxt, csh_msa_nxt = cond_gates[b_idx + 1][0], cond_gates[b_idx + 1][1]
                         cond, h_cond_msa_pre = fast_gate_add_and_modulate_cond(
@@ -1106,10 +1149,18 @@ class OptimizedLatDitRunner:
             and (not need_full_kv_cc)
             and (cached_cond_block7 is None)
         )
+        use_cond_cr_stride = (
+            (not uncond)
+            and (cond_cr_stride > 1)
+            and return_mid_delta
+            and (not need_full_kv_cc)
+            and (cached_cond_block7 is None)
+        )
         prev_nc_cr_out: Optional[torch.Tensor] = None
         prev_cond_msa_proj: Optional[torch.Tensor] = None
         prev_cond_rcr_proj: Optional[torch.Tensor] = None
         prev_cond_ffn_out: Optional[torch.Tensor] = None
+        prev_cond_x_cr_out: Optional[torch.Tensor] = None
         prev_pos_kv_x: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None
 
         for b_idx, block in enumerate(self.flow.blocks):
@@ -1143,6 +1194,20 @@ class OptimizedLatDitRunner:
                 and (b_idx < num_blocks - 2)
                 and (prev_nc_cr_out is not None)
             )
+            will_reuse_cond_cr = (
+                use_cond_cr_stride
+                and block.cond
+                and (b_idx > 0)
+                and (b_idx < self.cond_depth - 1)
+                and (b_idx % cond_cr_stride != 0)
+                and (prev_cond_x_cr_out is not None)
+                and use_cond_msa_stride
+                and (prev_cond_msa_proj is not None)
+                and use_cond_ffn_stride
+                and (prev_cond_rcr_proj is not None)
+                and (prev_cond_ffn_out is not None)
+                and (pos_kv_x_list is None or prev_pos_kv_x is not None)
+            )
 
             # --- 1. Windowed Self-Attention on 3D Voxels ---
             h_x_precomputed: Optional[torch.Tensor] = None
@@ -1166,7 +1231,12 @@ class OptimizedLatDitRunner:
                 )
                 attn_out = flash_varlen_qkvpacked_already_sorted(qkv_sorted, bwd_idx, cu_seqlens, max_len)
                 h = block.to_out(attn_out.reshape(N, D))
-                if (b_idx > 0 or cached_mid_delta is None) and (not use_1tok_uncond) and (not will_reuse_nc_cr):
+                if (
+                    (b_idx > 0 or cached_mid_delta is None)
+                    and (not use_1tok_uncond)
+                    and (not will_reuse_nc_cr)
+                    and (not will_reuse_cond_cr)
+                ):
                     # Fused MSA Gate-Add + Cross-Attention LayerNorm & AdaLN Modulation in 1 Triton kernel!
                     x, h_x_precomputed = fast_gate_add_and_modulate(
                         x, h, sizes, g_msa, s_cr, sh_cr, use_triton=use_triton
@@ -1197,17 +1267,30 @@ class OptimizedLatDitRunner:
                         # FreqCa CRF (NeurIPS 2026) + DBCache-FoCa Heun Calibrator (vipshop/cache-dit 2026)
                         # + BaryCache/L2P-Cache 2-Anchor Extrapolation (arXiv:2608.28670 / CVPR 2026)
                         # + DiCache Dynamic Cache Trajectory Alignment (ICLR 2026, arXiv:2508.17356)
-                        # + SenCache Sensitivity Scaling (CVPR 2026) + Prony/DMD Exponential Decay on fast pos steps (1, 3):
+                        # + RACER Dual-Forecast Disagreement Shrinkage (arXiv:2608.01740, Aug 2026)
+                        # + SpectralCache Singular-Value Norm Scaling (arXiv:2610.02660, Oct 2026):
                         cur_fn_res = x - x_patchify
                         crf_base = self._last_pos_crf_after_b0_msa
                         crf_s0 = getattr(self, "_last_pos_crf_after_b0_msa_step0", None)
+                        eff_mid_step_scale = eff_mid_scale
+                        if (
+                            use_spec_scale
+                            and spec_gamma > 0.0
+                            and getattr(self, "_last_b0_fn_res", None) is not None
+                            and self._last_b0_fn_res.shape == (N, D)
+                        ):
+                            norm_cur_l1 = float(cur_fn_res.abs().mean().item())
+                            norm_anc_l1 = float(self._last_b0_fn_res.abs().mean().item())
+                            eff_mid_step_scale = eff_mid_step_scale * compute_spectral_cache_scale(
+                                norm_cur_l1, norm_anc_l1, gamma=spec_gamma
+                            )
                         if (
                             bary_beta > 0.0
                             and crf_s0 is not None
                             and crf_s0 is not crf_base
                             and crf_s0.shape == (N, D)
                         ):
-                            eff_beta = bary_beta * eff_mid_scale if use_sencache else bary_beta
+                            eff_beta = bary_beta * eff_mid_step_scale if use_sencache else bary_beta
                             if (
                                 use_dicache_dcta
                                 and getattr(self, "_last_b0_fn_res", None) is not None
@@ -1220,10 +1303,13 @@ class OptimizedLatDitRunner:
                                 den_l1 = float((self._last_b0_fn_res - self._last_b0_fn_res_step0).abs().mean().item())
                                 dcta_ratio = min(1.35, max(0.65, num_l1 / max(1e-6, den_l1)))
                                 eff_beta = eff_beta * dcta_ratio
-                            x = torch.add(x, crf_base, alpha=eff_mid_scale * (1.0 + eff_beta))
-                            x = torch.add(x, crf_s0, alpha=-eff_mid_scale * eff_beta)
+                                if use_racer:
+                                    disagree_r = abs(num_l1 - den_l1) / max(1e-6, den_l1)
+                                    eff_beta = eff_beta * compute_racer_trust_shrinkage(disagree_r, horizon_k=1)
+                            x = torch.add(x, crf_base, alpha=eff_mid_step_scale * (1.0 + eff_beta))
+                            x = torch.add(x, crf_s0, alpha=-eff_mid_step_scale * eff_beta)
                         else:
-                            x = torch.add(x, crf_base, alpha=eff_mid_scale)
+                            x = torch.add(x, crf_base, alpha=eff_mid_step_scale)
                         if (
                             use_subblock_crf
                             and foca_gamma > 0.0
@@ -1427,160 +1513,24 @@ class OptimizedLatDitRunner:
                         and (prev_cond_msa_proj is not None)
                     )
                     if (
-                        b_idx == 0
-                        and (not uncond)
-                        and skip_cond_out
-                        and use_hetcache_b0
-                        and getattr(self, "_last_b0_cond_msa_out", None) is not None
-                        and self._last_b0_cond_msa_out.shape == (batch_size, L, D)
-                        and self._last_b0_cond_msa_out.device == device
+                        will_reuse_cond_cr
+                        and prev_cond_x_cr_out is not None
+                        and prev_cond_msa_proj is not None
+                        and prev_cond_rcr_proj is not None
+                        and prev_cond_ffn_out is not None
                     ):
-                        # HetCache (arXiv:2603.24260, 2026): static DINO context tokens in Block 0
-                        # reuse their O(L^2) self-attention output projection modulated by current `cg_msa(t)`!
-                        cond, h_cond_cr = fast_gate_add_and_modulate_cond(
-                            cond, self._last_b0_cond_msa_out, cg_msa, cs_cr, csh_cr, use_triton=use_triton
-                        )
-                    elif will_reuse_cond_msa and prev_cond_msa_proj is not None:
-                        # HetCache (arXiv:2603.24260) + DuCa (ToCa-v2) Alternating Conditioning Self-Attention Reuse:
+                        # RefAdapt-DiT (arXiv:2609.32415, Sep 2026) + PAB (ICLR 2025) + SCR (arXiv:2609.29505)
+                        # Block-Adaptive Reference-Conditioned Cross-Attention & DINO Residual Reuse:
                         # In odd intermediate conditioning blocks (1, 3, 5), reuse the previous even block's
-                        # O(L^2) DINO self-attention projection with the current block's exact gate `cg_msa[b_idx]`!
+                        # forward `x -> cond` cross-attention projection `prev_cond_x_cr_out` modulated by exact
+                        # current gate `g_cr[b_idx]`, and accumulate `prev_cond_msa_proj`, `prev_cond_rcr_proj`,
+                        # and `prev_cond_ffn_out` on `cond` with exact current gates `cg_msa`, `cg_cr`, `cg_mlp`,
+                        # bypassing all intermediate LayerNorms, QKV GEMMs, and FlashCrossAttn in blocks 1, 3, 5!
                         h_cond_msa_precomputed = None
-                        cond, h_cond_cr = fast_gate_add_and_modulate_cond(
-                            cond, prev_cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
-                        )
-                    else:
-                        h_cond = (
-                            h_cond_msa_precomputed
-                            if h_cond_msa_precomputed is not None
-                            else fast_modulate_cond(cond, cs_msa, csh_msa)
-                        )
-                        h_cond_msa_precomputed = None
-                        qkv_cond = block.cond_to_qkv(h_cond).view(batch_size, L, 3, H, HD)
-                        cq_scale = getattr(block.cond_qk_norm, "_q_scale_cast", block.cond_qk_norm.q_scale)
-                        ck_scale = getattr(block.cond_qk_norm, "_k_scale_cast", block.cond_qk_norm.k_scale)
-                        qkv_cond = fused_qknorm_rope2d_cond_inplace(
-                            qkv_cond, cq_scale, ck_scale, cos_cond_2d, sin_cond_2d, use_triton=use_triton
-                        )
-                        h_cond = flash_cond_self_attn(qkv_cond)
-                        cond_msa_proj = block.cond_to_out(h_cond.reshape(batch_size, L, D))
-                        if b_idx == 0 and not uncond:
-                            self._last_b0_cond_msa_out = cond_msa_proj
-                        if use_cond_msa_stride:
-                            prev_cond_msa_proj = cond_msa_proj
-                        cond, h_cond_cr = fast_gate_add_and_modulate_cond(
-                            cond, cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
-                        )
-
-                    h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
-                    kv_seq_cond_cr = kv_seqlens_full
-                    kv_max_cond_cr = kv_maxlen_full
-                    q_cc_cr: Optional[torch.Tensor] = None
-                    will_reuse_cond_ffn = (
-                        use_cond_ffn_stride
-                        and (b_idx > 0)
-                        and (b_idx < self.cond_depth - 1)
-                        and (b_idx % cond_ffn_stride != 0)
-                        and (prev_cond_rcr_proj is not None)
-                        and (prev_cond_ffn_out is not None)
-                        and (pos_kv_x_list is None or prev_pos_kv_x is not None)
-                    )
-                    if skip_cond_out:
-                        # Exact Cross-KV Slice: when skip_cond_out=True, Q_cc ([L, D]) is never used!
-                        # Compute only K_cc, V_cc ([L, 2*D]), cutting 33.3% of DINO cross-QKV GEMM FLOPs!
-                        kvc_w = getattr(block, "_cond_to_kv_cross_slice_w", None)
-                        if kvc_w is not None:
-                            kv_cc = F.linear(
-                                h_cond_cr, kvc_w, getattr(block, "_cond_to_kv_cross_slice_b", None)
-                            ).view(batch_size * L, 2, H, HD)
-                        else:
-                            kv_cc = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)[:, 1:]
-                    elif (
-                        (b_idx >= 1)
-                        and (cond_kv_qmc_stride > 1)
-                        and return_mid_delta
-                        and (not need_full_kv_cc)
-                        and batch_size == 1
-                        and L > 16
-                        and getattr(block, "_cond_to_q_cross_slice_w", None) is not None
-                        and getattr(block, "_cond_to_kv_cross_slice_w", None) is not None
-                    ):
-                        # ClusCa (arXiv:2509.10312) + MC-Sparse (arXiv:2610.06801) Conditioning DINO Cross-KV 2D QMC Stride:
-                        # In blocks 1..7 on Step 0 pos, compute full-L Q_cc for reverse `cond -> x` pooling (only on active FFN blocks),
-                        # and 2D QMC strided K_cc, V_cc (5 global tokens + every `cond_kv_qmc_stride`-th patch)
-                        # for forward `x -> cond` cross-attention, cutting 50%-83% of cond_to_qkv_cross GEMM FLOPs
-                        # and 75% of forward x->cond FlashAttention FLOPs!
-                        if not will_reuse_cond_ffn:
-                            q_cc_cr = F.linear(
-                                h_cond_cr,
-                                block._cond_to_q_cross_slice_w,
-                                getattr(block, "_cond_to_q_cross_slice_b", None),
-                            ).view(batch_size * L, H, HD)
-                        h_cond_cr_sub = torch.cat(
-                            [h_cond_cr[:, :5], h_cond_cr[:, 5::cond_kv_qmc_stride]], dim=1
-                        ).contiguous()
-                        L_sub_cr = h_cond_cr_sub.shape[1]
-                        kv_cc = F.linear(
-                            h_cond_cr_sub.view(batch_size * L_sub_cr, D),
-                            block._cond_to_kv_cross_slice_w,
-                            getattr(block, "_cond_to_kv_cross_slice_b", None),
-                        ).view(batch_size * L_sub_cr, 2, H, HD)
-                        c_key = f"kv_seqlens_nc_{L_sub_cr}"
-                        kv_seq_cond_cr = geom.get(c_key)
-                        if kv_seq_cond_cr is None:
-                            kv_seq_cond_cr = torch.arange(
-                                0, (batch_size + 1) * L_sub_cr, L_sub_cr, device=device, dtype=torch.int32
-                            )
-                            geom[c_key] = kv_seq_cond_cr
-                        kv_max_cond_cr = L_sub_cr
-                    else:
-                        qkv_cc_cr = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)
-                        q_cc_cr = qkv_cc_cr[:, 0]
-                        kv_cc = qkv_cc_cr[:, 1:]
-                    if need_full_kv_cc and kv_cc_cache_out is not None:
-                        kv_cc_cache_out.append(kv_cc)
-
-                    if skip_cond_out:
-                        # Only Q_x is needed when updated `cond` is not read by subsequent blocks!
-                        q_w = getattr(block, "_to_q_cross_w", None)
-                        if q_w is not None:
-                            q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
-                        else:
-                            q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
-                        h_x_out = flash_cross_attn(
-                            q_x,
-                            q_seqlens,
-                            q_maxlen,
-                            kv_cc,
-                            kv_seqlens_full,
-                            kv_maxlen_full,
-                        )
-                        cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
-                        if b_idx == 0 and not uncond:
-                            self._last_b0_cr_proj = cr_proj_out
-                        cr_out_for_x = cr_proj_out
-                    elif will_reuse_cond_ffn and prev_cond_rcr_proj is not None and prev_cond_ffn_out is not None:
-                        # SCR (Spectral-Guided Diffusion, arXiv:2609.29505, Aug 2026) + HetCache (arXiv:2603.24260)
-                        # + LayerCache (arXiv:2604.16492): in odd intermediate conditioning blocks (1, 3, 5),
-                        # compute exact forward `x -> cond` cross-attention for 3D voxels while reusing the
-                        # adjacent even block's reverse `cond <- x` projection and 4101-token DINO FFN residual
-                        # modulated by the current block's exact gates `cg_cr[b_idx]` and `cg_mlp[b_idx]`!
-                        q_w = getattr(block, "_to_q_cross_w", None)
-                        if q_w is not None:
-                            q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
-                        else:
-                            q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
+                        cr_out_for_x = prev_cond_x_cr_out
                         if pos_kv_x_list is not None and prev_pos_kv_x is not None:
                             pos_kv_x_list.append(prev_pos_kv_x)
-                        h_x_out = flash_cross_attn(
-                            q_x,
-                            q_seqlens,
-                            q_maxlen,
-                            kv_cc,
-                            kv_seq_cond_cr,
-                            kv_max_cond_cr,
-                        )
-                        cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
-                        cr_out_for_x = cr_proj_out
+                        cond = fast_gate_add_cond(cond, prev_cond_msa_proj, cg_msa)
                         cond = fast_gate_add_cond(cond, prev_cond_rcr_proj, cg_cr)
                         cond_ffn_out = prev_cond_ffn_out
                         next_reuses_cond_msa = (
@@ -1603,112 +1553,292 @@ class OptimizedLatDitRunner:
                             cond = fast_gate_add_cond(cond, cond_ffn_out, cg_mlp)
                     else:
                         if (
-                            return_mid_delta
+                            b_idx == 0
+                            and (not uncond)
+                            and skip_cond_out
+                            and use_hetcache_b0
+                            and getattr(self, "_last_b0_cond_msa_out", None) is not None
+                            and self._last_b0_cond_msa_out.shape == (batch_size, L, D)
+                            and self._last_b0_cond_msa_out.device == device
+                        ):
+                            # HetCache (arXiv:2603.24260, 2026): static DINO context tokens in Block 0
+                            # reuse their O(L^2) self-attention output projection modulated by current `cg_msa(t)`!
+                            cond, h_cond_cr = fast_gate_add_and_modulate_cond(
+                                cond, self._last_b0_cond_msa_out, cg_msa, cs_cr, csh_cr, use_triton=use_triton
+                            )
+                        elif will_reuse_cond_msa and prev_cond_msa_proj is not None:
+                            # HetCache (arXiv:2603.24260) + DuCa (ToCa-v2) Alternating Conditioning Self-Attention Reuse:
+                            # In odd intermediate conditioning blocks (1, 3, 5), reuse the previous even block's
+                            # O(L^2) DINO self-attention projection with the current block's exact gate `cg_msa[b_idx]`!
+                            h_cond_msa_precomputed = None
+                            cond, h_cond_cr = fast_gate_add_and_modulate_cond(
+                                cond, prev_cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
+                            )
+                        else:
+                            h_cond = (
+                                h_cond_msa_precomputed
+                                if h_cond_msa_precomputed is not None
+                                else fast_modulate_cond(cond, cs_msa, csh_msa)
+                            )
+                            h_cond_msa_precomputed = None
+                            qkv_cond = block.cond_to_qkv(h_cond).view(batch_size, L, 3, H, HD)
+                            cq_scale = getattr(block.cond_qk_norm, "_q_scale_cast", block.cond_qk_norm.q_scale)
+                            ck_scale = getattr(block.cond_qk_norm, "_k_scale_cast", block.cond_qk_norm.k_scale)
+                            qkv_cond = fused_qknorm_rope2d_cond_inplace(
+                                qkv_cond, cq_scale, ck_scale, cos_cond_2d, sin_cond_2d, use_triton=use_triton
+                            )
+                            h_cond = flash_cond_self_attn(qkv_cond)
+                            cond_msa_proj = block.cond_to_out(h_cond.reshape(batch_size, L, D))
+                            if b_idx == 0 and not uncond:
+                                self._last_b0_cond_msa_out = cond_msa_proj
+                            if use_cond_msa_stride:
+                                prev_cond_msa_proj = cond_msa_proj
+                            cond, h_cond_cr = fast_gate_add_and_modulate_cond(
+                                cond, cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
+                            )
+
+                        h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
+                        kv_seq_cond_cr = kv_seqlens_full
+                        kv_max_cond_cr = kv_maxlen_full
+                        q_cc_cr: Optional[torch.Tensor] = None
+                        will_reuse_cond_ffn = (
+                            use_cond_ffn_stride
+                            and (b_idx > 0)
+                            and (b_idx < self.cond_depth - 1)
+                            and (b_idx % cond_ffn_stride != 0)
+                            and (prev_cond_rcr_proj is not None)
+                            and (prev_cond_ffn_out is not None)
+                            and (pos_kv_x_list is None or prev_pos_kv_x is not None)
+                        )
+                        if skip_cond_out:
+                            # Exact Cross-KV Slice: when skip_cond_out=True, Q_cc ([L, D]) is never used!
+                            # Compute only K_cc, V_cc ([L, 2*D]), cutting 33.3% of DINO cross-QKV GEMM FLOPs!
+                            kvc_w = getattr(block, "_cond_to_kv_cross_slice_w", None)
+                            if kvc_w is not None:
+                                kv_cc = F.linear(
+                                    h_cond_cr, kvc_w, getattr(block, "_cond_to_kv_cross_slice_b", None)
+                                ).view(batch_size * L, 2, H, HD)
+                            else:
+                                kv_cc = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)[:, 1:]
+                        elif (
+                            (b_idx >= 1)
+                            and (cond_kv_qmc_stride > 1)
+                            and return_mid_delta
                             and (not need_full_kv_cc)
                             and batch_size == 1
-                            and N >= 64
-                            and pos_qmc_stride > 1
+                            and L > 16
+                            and getattr(block, "_cond_to_q_cross_slice_w", None) is not None
+                            and getattr(block, "_cond_to_kv_cross_slice_w", None) is not None
                         ):
-                            # Dual-Asymmetric Cross-Attention (MC-Sparse arXiv:2610.06801 / JiT CVPR 2026):
-                            # 1. Exact full-N Q_x ([N, H, HD]) for voxel -> DINO cross-attention (`x -> cond`)
-                            # 2. Hilbert-curve QMC strided K_x, V_x (`h_x[::pos_qmc_stride]`) for global DINO
-                            #    context pooling (`cond -> x`), cutting 50% of to_qkv_cross GEMM FLOPs and 75%
-                            #    of reverse FlashAttention FLOPs across all 8 conditioning blocks!
-                            q_w = getattr(block, "_to_q_cross_w", None)
-                            kv_w = getattr(block, "_to_kv_cross_w", None)
-                            if q_w is not None and kv_w is not None:
-                                q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
-                                h_x_sub = h_x[::pos_qmc_stride]
-                                n_sub_pos = h_x_sub.shape[0]
-                                kv_x = F.linear(h_x_sub, kv_w, getattr(block, "_to_kv_cross_b", None)).view(
-                                    n_sub_pos, 2, H, HD
+                            # ClusCa (arXiv:2509.10312) + MC-Sparse (arXiv:2610.06801) Conditioning DINO Cross-KV 2D QMC Stride:
+                            # In blocks 1..7 on Step 0 pos, compute full-L Q_cc for reverse `cond -> x` pooling (only on active FFN blocks),
+                            # and 2D QMC strided K_cc, V_cc (5 global tokens + every `cond_kv_qmc_stride`-th patch)
+                            # for forward `x -> cond` cross-attention, cutting 50%-83% of cond_to_qkv_cross GEMM FLOPs
+                            # and 75% of forward x->cond FlashAttention FLOPs!
+                            if not will_reuse_cond_ffn:
+                                q_cc_cr = F.linear(
+                                    h_cond_cr,
+                                    block._cond_to_q_cross_slice_w,
+                                    getattr(block, "_cond_to_q_cross_slice_b", None),
+                                ).view(batch_size * L, H, HD)
+                            h_cond_cr_sub = torch.cat(
+                                [h_cond_cr[:, :5], h_cond_cr[:, 5::cond_kv_qmc_stride]], dim=1
+                            ).contiguous()
+                            L_sub_cr = h_cond_cr_sub.shape[1]
+                            kv_cc = F.linear(
+                                h_cond_cr_sub.view(batch_size * L_sub_cr, D),
+                                block._cond_to_kv_cross_slice_w,
+                                getattr(block, "_cond_to_kv_cross_slice_b", None),
+                            ).view(batch_size * L_sub_cr, 2, H, HD)
+                            c_key = f"kv_seqlens_nc_{L_sub_cr}"
+                            kv_seq_cond_cr = geom.get(c_key)
+                            if kv_seq_cond_cr is None:
+                                kv_seq_cond_cr = torch.arange(
+                                    0, (batch_size + 1) * L_sub_cr, L_sub_cr, device=device, dtype=torch.int32
                                 )
-                                q_seq_pos = geom.get(f"q_seqlens_qmc_{pos_qmc_stride}")
-                                if q_seq_pos is None:
-                                    q_seq_pos = torch.tensor([0, n_sub_pos], device=device, dtype=torch.int32)
-                                    geom[f"q_seqlens_qmc_{pos_qmc_stride}"] = q_seq_pos
-                                q_max_pos = n_sub_pos
+                                geom[c_key] = kv_seq_cond_cr
+                            kv_max_cond_cr = L_sub_cr
+                        else:
+                            qkv_cc_cr = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)
+                            q_cc_cr = qkv_cc_cr[:, 0]
+                            kv_cc = qkv_cc_cr[:, 1:]
+                        if need_full_kv_cc and kv_cc_cache_out is not None:
+                            kv_cc_cache_out.append(kv_cc)
+
+                        if skip_cond_out:
+                            # Only Q_x is needed when updated `cond` is not read by subsequent blocks!
+                            q_w = getattr(block, "_to_q_cross_w", None)
+                            if q_w is not None:
+                                q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                            else:
+                                q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
+                            h_x_out = flash_cross_attn(
+                                q_x,
+                                q_seqlens,
+                                q_maxlen,
+                                kv_cc,
+                                kv_seqlens_full,
+                                kv_maxlen_full,
+                            )
+                            cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
+                            if b_idx == 0 and not uncond:
+                                self._last_b0_cr_proj = cr_proj_out
+                            cr_out_for_x = cr_proj_out
+                        elif will_reuse_cond_ffn and prev_cond_rcr_proj is not None and prev_cond_ffn_out is not None:
+                            # SCR (Spectral-Guided Diffusion, arXiv:2609.29505, Aug 2026) + HetCache (arXiv:2603.24260)
+                            # + LayerCache (arXiv:2604.16492): in odd intermediate conditioning blocks (1, 3, 5),
+                            # compute exact forward `x -> cond` cross-attention for 3D voxels while reusing the
+                            # adjacent even block's reverse `cond <- x` projection and 4101-token DINO FFN residual
+                            # modulated by the current block's exact gates `cg_cr[b_idx]` and `cg_mlp[b_idx]`!
+                            q_w = getattr(block, "_to_q_cross_w", None)
+                            if q_w is not None:
+                                q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                            else:
+                                q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
+                            if pos_kv_x_list is not None and prev_pos_kv_x is not None:
+                                pos_kv_x_list.append(prev_pos_kv_x)
+                            h_x_out = flash_cross_attn(
+                                q_x,
+                                q_seqlens,
+                                q_maxlen,
+                                kv_cc,
+                                kv_seq_cond_cr,
+                                kv_max_cond_cr,
+                            )
+                            cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
+                            if use_cond_cr_stride:
+                                prev_cond_x_cr_out = cr_proj_out
+                            cr_out_for_x = cr_proj_out
+                            cond = fast_gate_add_cond(cond, prev_cond_rcr_proj, cg_cr)
+                            cond_ffn_out = prev_cond_ffn_out
+                            next_reuses_cond_msa = (
+                                use_cond_msa_stride
+                                and (b_idx + 1 > 0)
+                                and (b_idx + 1 < self.cond_depth - 1)
+                                and ((b_idx + 1) % cond_msa_stride != 0)
+                            )
+                            if (
+                                use_interblock_fuse
+                                and (b_idx + 1 < self.cond_depth)
+                                and (cached_mid_delta is None)
+                                and (not next_reuses_cond_msa)
+                            ):
+                                cs_msa_nxt, csh_msa_nxt = cond_gates[b_idx + 1][0], cond_gates[b_idx + 1][1]
+                                cond, h_cond_msa_precomputed = fast_gate_add_and_modulate_cond(
+                                    cond, cond_ffn_out, cg_mlp, cs_msa_nxt, csh_msa_nxt, use_triton=use_triton
+                                )
+                            else:
+                                cond = fast_gate_add_cond(cond, cond_ffn_out, cg_mlp)
+                        else:
+                            if (
+                                return_mid_delta
+                                and (not need_full_kv_cc)
+                                and batch_size == 1
+                                and N >= 64
+                                and pos_qmc_stride > 1
+                            ):
+                                # Dual-Asymmetric Cross-Attention (MC-Sparse arXiv:2610.06801 / JiT CVPR 2026):
+                                # 1. Exact full-N Q_x ([N, H, HD]) for voxel -> DINO cross-attention (`x -> cond`)
+                                # 2. Hilbert-curve QMC strided K_x, V_x (`h_x[::pos_qmc_stride]`) for global DINO
+                                #    context pooling (`cond -> x`), cutting 50% of to_qkv_cross GEMM FLOPs and 75%
+                                #    of reverse FlashAttention FLOPs across all 8 conditioning blocks!
+                                q_w = getattr(block, "_to_q_cross_w", None)
+                                kv_w = getattr(block, "_to_kv_cross_w", None)
+                                if q_w is not None and kv_w is not None:
+                                    q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                                    h_x_sub = h_x[::pos_qmc_stride]
+                                    n_sub_pos = h_x_sub.shape[0]
+                                    kv_x = F.linear(h_x_sub, kv_w, getattr(block, "_to_kv_cross_b", None)).view(
+                                        n_sub_pos, 2, H, HD
+                                    )
+                                    q_seq_pos = geom.get(f"q_seqlens_qmc_{pos_qmc_stride}")
+                                    if q_seq_pos is None:
+                                        q_seq_pos = torch.tensor([0, n_sub_pos], device=device, dtype=torch.int32)
+                                        geom[f"q_seqlens_qmc_{pos_qmc_stride}"] = q_seq_pos
+                                    q_max_pos = n_sub_pos
+                                else:
+                                    qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
+                                    q_x = qkv_x_cr[:, 0]
+                                    kv_x = qkv_x_cr[:, 1:]
+                                    q_seq_pos = q_seqlens
+                                    q_max_pos = q_maxlen
                             else:
                                 qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
                                 q_x = qkv_x_cr[:, 0]
                                 kv_x = qkv_x_cr[:, 1:]
                                 q_seq_pos = q_seqlens
                                 q_max_pos = q_maxlen
-                        else:
-                            qkv_x_cr = block.to_qkv_cross(h_x).view(N, 3, H, HD)
-                            q_x = qkv_x_cr[:, 0]
-                            kv_x = qkv_x_cr[:, 1:]
-                            q_seq_pos = q_seqlens
-                            q_max_pos = q_maxlen
 
-                        cur_pos_kv_x = (kv_x, q_seq_pos, int(q_max_pos))
-                        if pos_kv_x_list is not None:
-                            pos_kv_x_list.append(cur_pos_kv_x)
-                        if use_cond_ffn_stride:
-                            prev_pos_kv_x = cur_pos_kv_x
-                        h_x_out = flash_cross_attn(
-                            q_x,
-                            q_seqlens,
-                            q_maxlen,
-                            kv_cc,
-                            kv_seq_cond_cr,
-                            kv_max_cond_cr,
-                        )
-                        cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
-                        if b_idx == 0 and not uncond:
-                            self._last_b0_cr_proj = cr_proj_out
-                        cr_out_for_x = cr_proj_out
-
-                        h_c_out = flash_cross_attn(
-                            q_cc_cr,
-                            kv_seqlens_full,
-                            kv_maxlen_full,
-                            kv_x,
-                            q_seq_pos,
-                            q_max_pos,
-                        )
-                        cond_rcr_proj = block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D))
-                        if use_cond_ffn_stride:
-                            prev_cond_rcr_proj = cond_rcr_proj
-                        cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
-                            cond,
-                            cond_rcr_proj,
-                            cg_cr,
-                            cs_mlp,
-                            csh_mlp,
-                            use_triton=use_triton,
-                        )
-
-                        cond_ffn_out = block.cond_ffn1(
-                            fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)
-                        )
-                        if use_cond_ffn_stride:
-                            prev_cond_ffn_out = cond_ffn_out
-                        next_reuses_cond_msa = (
-                            use_cond_msa_stride
-                            and (b_idx + 1 > 0)
-                            and (b_idx + 1 < self.cond_depth - 1)
-                            and ((b_idx + 1) % cond_msa_stride != 0)
-                        )
-                        if (
-                            use_interblock_fuse
-                            and (b_idx + 1 < self.cond_depth)
-                            and (cached_mid_delta is None)
-                            and (not next_reuses_cond_msa)
-                        ):
-                            cs_msa_nxt, csh_msa_nxt = cond_gates[b_idx + 1][0], cond_gates[b_idx + 1][1]
-                            cond, h_cond_msa_precomputed = fast_gate_add_and_modulate_cond(
-                                cond, cond_ffn_out, cg_mlp, cs_msa_nxt, csh_msa_nxt, use_triton=use_triton
+                            cur_pos_kv_x = (kv_x, q_seq_pos, int(q_max_pos))
+                            if pos_kv_x_list is not None:
+                                pos_kv_x_list.append(cur_pos_kv_x)
+                            if use_cond_ffn_stride:
+                                prev_pos_kv_x = cur_pos_kv_x
+                            h_x_out = flash_cross_attn(
+                                q_x,
+                                q_seqlens,
+                                q_maxlen,
+                                kv_cc,
+                                kv_seq_cond_cr,
+                                kv_max_cond_cr,
                             )
-                        elif use_b7_fuse and (b_idx == self.cond_depth - 1) and (cached_cond_block7 is None):
-                            need_c_out = bool(return_cond_delta and cond_mid_in is not None)
-                            cond_new, ln_cond_after_7 = fast_gate_add_and_ln_cond(
-                                cond, cond_ffn_out, cg_mlp, use_triton=use_triton, return_cond=need_c_out
+                            cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
+                            if b_idx == 0 and not uncond:
+                                self._last_b0_cr_proj = cr_proj_out
+                            if use_cond_cr_stride:
+                                prev_cond_x_cr_out = cr_proj_out
+                            cr_out_for_x = cr_proj_out
+
+                            h_c_out = flash_cross_attn(
+                                q_cc_cr,
+                                kv_seqlens_full,
+                                kv_maxlen_full,
+                                kv_x,
+                                q_seq_pos,
+                                q_max_pos,
                             )
-                            if need_c_out and cond_new is not None:
-                                cond = cond_new
-                        else:
-                            cond = fast_gate_add_cond(cond, cond_ffn_out, cg_mlp)
+                            cond_rcr_proj = block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D))
+                            if use_cond_ffn_stride:
+                                prev_cond_rcr_proj = cond_rcr_proj
+                            cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
+                                cond,
+                                cond_rcr_proj,
+                                cg_cr,
+                                cs_mlp,
+                                csh_mlp,
+                                use_triton=use_triton,
+                            )
+
+                            cond_ffn_out = block.cond_ffn1(
+                                fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)
+                            )
+                            if use_cond_ffn_stride:
+                                prev_cond_ffn_out = cond_ffn_out
+                            next_reuses_cond_msa = (
+                                use_cond_msa_stride
+                                and (b_idx + 1 > 0)
+                                and (b_idx + 1 < self.cond_depth - 1)
+                                and ((b_idx + 1) % cond_msa_stride != 0)
+                            )
+                            if (
+                                use_interblock_fuse
+                                and (b_idx + 1 < self.cond_depth)
+                                and (cached_mid_delta is None)
+                                and (not next_reuses_cond_msa)
+                            ):
+                                cs_msa_nxt, csh_msa_nxt = cond_gates[b_idx + 1][0], cond_gates[b_idx + 1][1]
+                                cond, h_cond_msa_precomputed = fast_gate_add_and_modulate_cond(
+                                    cond, cond_ffn_out, cg_mlp, cs_msa_nxt, csh_msa_nxt, use_triton=use_triton
+                                )
+                            elif use_b7_fuse and (b_idx == self.cond_depth - 1) and (cached_cond_block7 is None):
+                                need_c_out = bool(return_cond_delta and cond_mid_in is not None)
+                                cond_new, ln_cond_after_7 = fast_gate_add_and_ln_cond(
+                                    cond, cond_ffn_out, cg_mlp, use_triton=use_triton, return_cond=need_c_out
+                                )
+                                if need_c_out and cond_new is not None:
+                                    cond = cond_new
+                            else:
+                                cond = fast_gate_add_cond(cond, cond_ffn_out, cg_mlp)
 
                 if b_idx == self.cond_depth - 1 and cached_cond_block7 is None:
                     if return_cond_delta and cond_mid_in is not None:
@@ -2081,6 +2211,8 @@ class OptimizedLatDitRunner:
         postcache_gamma = float(getattr(self.solver_config, "postcache_rts_gamma", 0.020))
         use_arex_affine = bool(getattr(self.solver_config, "arex_affine_integrator", True))
         arex_gamma = float(getattr(self.solver_config, "arex_affine_gamma", 0.016))
+        use_racer_shrink = bool(getattr(self.solver_config, "racer_disagreement_shrinkage", True))
+        racer_eta = float(getattr(self.solver_config, "racer_trust_eta", 0.15))
         prev_v_pos_step: Optional[torch.Tensor] = None
         prev2_v_pos_step: Optional[torch.Tensor] = None
         num_blocks = len(self.flow.blocks)
@@ -2378,8 +2510,10 @@ class OptimizedLatDitRunner:
                             )
                         if use_stork4 and stork4_gamma > 0.0 and step_idx >= 2:
                             # STORK-4 / ROCK4 4-Stage Composition Finishing Integrator
-                            # (Tan, Wang, Bertozzi & Ryu, ICLR 2026, arXiv:2505.24210v2 / Abdulle 2002):
-                            # Non-uniform 3-point Lagrange second-derivative curvature correction!
+                            # (Tan, Wang, Bertozzi & Ryu, ICLR 2026, arXiv:2505.24210v2 / Abdulle 2002)
+                            # + RACER Dual-Forecast Disagreement Shrinkage (Li et al., arXiv:2608.01740, Aug 2026):
+                            # Non-uniform 3-point Lagrange second-derivative curvature correction with closed-loop
+                            # disagreement shrinkage when CAB and ROCK4 curvature forecasts diverge!
                             h_p2 = float(t_list[step_idx - 2]) - float(t_list[step_idx - 1])
                             h_p1 = float(t_list[step_idx - 1]) - t_val
                             w_c, w_p1, w_p2 = compute_stork4_rock4_weights(h_p2, h_p1, dt)
@@ -2388,6 +2522,12 @@ class OptimizedLatDitRunner:
                             rock4_res = (1.0 / (1.0 + pade_eta * ((rock4_curv * rock4_curv).sum() / v_norm_r4))).to(
                                 dtype=v_step.dtype
                             )
+                            if use_racer_shrink and use_cab_defect and cab_gamma > 0.0 and racer_eta > 0.0:
+                                racer_diff = cab_defect - rock4_curv
+                                racer_trust = (
+                                    1.0 / (1.0 + racer_eta * ((racer_diff * racer_diff).sum() / v_norm_r4))
+                                ).to(dtype=v_step.dtype)
+                                rock4_res = rock4_res * racer_trust
                             v_step = torch.addcmul(
                                 v_step,
                                 rock4_curv,

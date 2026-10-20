@@ -99,6 +99,12 @@ class SolverConfig:
     arex_affine_gamma: float = 0.016
     koopman_shallow_observer: bool = True
     koopman_observer_gain: float = 0.035
+    uncond_1tok_cond_ffn_stride: int = 2
+    refadapt_cond_cr_stride: int = 2
+    racer_disagreement_shrinkage: bool = True
+    racer_trust_eta: float = 0.15
+    spectral_norm_scaling: bool = True
+    spectral_norm_gamma: float = 0.035
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -316,6 +322,47 @@ def compute_arex_affine_defect(
     exact_shrink_rate = (1.0 - f_prop) / dt
     affine_defect = max(-0.35, min(0.35, exact_shrink_rate - k_t))
     return float(affine_defect), float(k_t)
+
+
+def compute_racer_trust_shrinkage(
+    disagreement_r: float,
+    horizon_k: int = 1,
+    lam: float = 0.12,
+    beta: float = 4.0,
+    theta_kappa: float = 0.35,
+) -> float:
+    """
+    RACER Closed-Loop Dual-Forecast Disagreement Shrinkage
+    (Li et al., arXiv:2608.01740, Aug 2026, Eq. 3 & Propositions 1-2):
+        kappa_t = exp(-lam * max(k_t - 1, 0)) * sigma(beta * (theta_kappa - r_t))
+    Continuously shrinks extrapolated forecasts toward the nearest exact anchor a_t
+    when two predictors diverge (r_t > theta_kappa), guaranteeing a deterministic endpoint
+    error bound ||y_hat_t(kappa) - h_t|| <= kappa * B_f + (1 - kappa) * B_h.
+    """
+    r_val = max(0.0, float(disagreement_r))
+    k_val = max(0, int(horizon_k) - 1)
+    horizon_decay = math.exp(-max(0.0, float(lam)) * float(k_val))
+    z = max(-20.0, min(20.0, float(beta) * (float(theta_kappa) - r_val)))
+    sig_trust = 1.0 / (1.0 + math.exp(-z))
+    return float(max(0.15, min(1.0, horizon_decay * sig_trust)))
+
+
+def compute_spectral_cache_scale(
+    norm_cur: float,
+    norm_anchor: float,
+    gamma: float = 0.035,
+) -> float:
+    """
+    SpectralCache Singular-Value Norm Ratio Scaling
+    (Mi et al., arXiv:2610.02660, Oct 2026, Sec. 3 & Fig. 3b):
+    Approximates singular value evolution within a stable singular subspace (U_t, V_t)
+    by damped spectral magnitude ratio (||Sigma_t||_2 / ||Sigma_q||_2)^gamma.
+    """
+    nc = max(1e-6, float(norm_cur))
+    na = max(1e-6, float(norm_anchor))
+    ratio = min(1.35, max(0.70, nc / na))
+    g = max(0.0, min(0.25, float(gamma)))
+    return float(1.0 + g * (ratio - 1.0))
 
 
 

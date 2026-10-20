@@ -3175,5 +3175,11 @@
   "arex_affine_integrator": true,
   "arex_affine_gamma": 0.016,
   "koopman_shallow_observer": true,
-  "koopman_observer_gain": 0.035
+  "koopman_observer_gain": 0.035,
+  "uncond_1tok_cond_ffn_stride": 2,
+  "refadapt_cond_cr_stride": 2,
+  "racer_disagreement_shrinkage": true,
+  "racer_trust_eta": 0.15,
+  "spectral_norm_scaling": true,
+  "spectral_norm_gamma": 0.035
 }
