@@ -27,6 +27,7 @@ _CUROPE = None
 
 # Cache of dummy ones tensors keyed by (device, dtype, dim) to avoid per-call allocations
 _ONES_CACHE: Dict[Tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
+_SEQLEN_1B_CACHE: Dict[Tuple[torch.device, int], torch.Tensor] = {}
 
 
 def get_cached_ones(dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -36,6 +37,15 @@ def get_cached_ones(dim: int, device: torch.device, dtype: torch.dtype) -> torch
         t = torch.ones(dim, device=device, dtype=dtype)
         _ONES_CACHE[key] = t
     return t
+
+
+def _get_1b_cu_seqlens(device: torch.device, seqlen: int) -> torch.Tensor:
+    key = (device, int(seqlen))
+    cu = _SEQLEN_1B_CACHE.get(key)
+    if cu is None:
+        cu = torch.tensor([0, int(seqlen)], device=device, dtype=torch.int32)
+        _SEQLEN_1B_CACHE[key] = cu
+    return cu
 
 
 def install_cpu_fallbacks() -> None:
@@ -684,6 +694,8 @@ def fast_gate_add_and_modulate(
         and residual.is_contiguous()
         and h.is_contiguous()
         and residual.shape[-1] <= 2048
+        and h.shape[-1] == residual.shape[-1]
+        and (h.shape[0] == residual.shape[0] or h.shape[0] == 1)
     ):
         try:
             D = residual.shape[-1]
@@ -760,6 +772,10 @@ def fast_gate_add_and_modulate_cond(
         and cond.is_contiguous()
         and h.is_contiguous()
         and cond.shape[-1] <= 2048
+        and h.ndim == 3
+        and h.shape[0] == 1
+        and h.shape[-1] == cond.shape[-1]
+        and (h.shape[1] == cond.shape[1] or h.shape[1] == 1)
     ):
         try:
             D = cond.shape[-1]
@@ -826,6 +842,10 @@ def fast_gate_add_and_ln_cond(
         and cond.is_contiguous()
         and h.is_contiguous()
         and cond.shape[-1] <= 2048
+        and h.ndim == 3
+        and h.shape[0] == 1
+        and h.shape[-1] == cond.shape[-1]
+        and (h.shape[1] == cond.shape[1] or h.shape[1] == 1)
     ):
         try:
             D = cond.shape[-1]
@@ -1402,7 +1422,24 @@ def fused_qknorm_rope2d_cond_inplace(
     On GPU with Triton and B==1, executes in-place in a single kernel with zero allocations!
     """
     B, L, _, H, D = qkv_cond.shape
-    if use_triton and HAS_TRITON and qkv_cond.is_cuda and B == 1 and D == 96 and qkv_cond.is_contiguous():
+    l_spatial = max(0, L - 5)
+    if l_spatial > 0 and cos_cond_2d.shape[1] != l_spatial:
+        if cos_cond_2d.shape[1] > l_spatial:
+            stride_2d = max(1, (cos_cond_2d.shape[1] + l_spatial - 1) // l_spatial)
+            cos_cond_2d = cos_cond_2d[:, ::stride_2d][:, :l_spatial].contiguous()
+            sin_cond_2d = sin_cond_2d[:, ::stride_2d][:, :l_spatial].contiguous()
+    if (
+        use_triton
+        and HAS_TRITON
+        and qkv_cond.is_cuda
+        and B == 1
+        and D == 96
+        and qkv_cond.is_contiguous()
+        and cos_cond_2d.shape[1] >= l_spatial
+        and sin_cond_2d.shape[1] >= l_spatial
+        and cos_cond_2d.is_contiguous()
+        and sin_cond_2d.is_contiguous()
+    ):
         try:
             _fused_qknorm_rope2d_cond_inplace_kernel[(L, H)](
                 qkv_cond,
@@ -1574,6 +1611,14 @@ def flash_cross_attn(
     max_seqlen_kv: int,
 ) -> torch.Tensor:
     """Run FlashAttention cross-attention between q [T_q, H, D] and kv [T_kv, 2, H, D]."""
+    tq = int(q.shape[0])
+    tkv = int(kv.shape[0])
+    if int(max_seqlen_q) != tq and cu_seqlens_q.numel() == 2:
+        cu_seqlens_q = _get_1b_cu_seqlens(q.device, tq)
+        max_seqlen_q = tq
+    if int(max_seqlen_kv) != tkv and cu_seqlens_kv.numel() == 2:
+        cu_seqlens_kv = _get_1b_cu_seqlens(kv.device, tkv)
+        max_seqlen_kv = tkv
     if q.is_cuda:
         if q.stride(-1) != 1:
             q = q.contiguous()
@@ -1582,13 +1627,18 @@ def flash_cross_attn(
         if _FLASH_ATTN_3 is not None:
             k, v = kv.unbind(dim=-3)
             return _FLASH_ATTN_3.flash_attn_varlen_func(
-                q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
+                q, k, v, cu_seqlens_q, cu_seqlens_kv, int(max_seqlen_q), int(max_seqlen_kv)
             )
         if _FLASH_ATTN is not None:
             return _FLASH_ATTN.flash_attn_varlen_kvpacked_func(
-                q, kv, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
+                q, kv, cu_seqlens_q, cu_seqlens_kv, int(max_seqlen_q), int(max_seqlen_kv)
             )
     k, v = kv.unbind(dim=-3)
+    if int(cu_seqlens_q[-1].item()) != tq or int(cu_seqlens_kv[-1].item()) != tkv:
+        raise RuntimeError(
+            f"flash_cross_attn seqlen mismatch: q={tq} vs cu_q={int(cu_seqlens_q[-1].item())}, "
+            f"kv={tkv} vs cu_kv={int(cu_seqlens_kv[-1].item())}"
+        )
     return F.scaled_dot_product_attention(
         q.unsqueeze(0).transpose(1, 2),
         k.unsqueeze(0).transpose(1, 2),

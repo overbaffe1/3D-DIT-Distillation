@@ -1814,8 +1814,20 @@ class OptimizedLatDitRunner:
                         else:
                             q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
                         kv_cc = cached_cond_block7[b_idx]
+                        l_c7 = kv_cc.shape[0] // batch_size
+                        if l_c7 == kv_maxlen_full:
+                            kv_seq_c7, kv_max_c7 = kv_seqlens_full, kv_maxlen_full
+                        else:
+                            c7_key = f"kv_seqlens_nc_{l_c7}"
+                            kv_seq_c7 = geom.get(c7_key)
+                            if kv_seq_c7 is None:
+                                kv_seq_c7 = torch.arange(
+                                    0, (batch_size + 1) * l_c7, l_c7, device=device, dtype=torch.int32
+                                )
+                                geom[c7_key] = kv_seq_c7
+                            kv_max_c7 = l_c7
                         h_x_out = flash_cross_attn(
-                            q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
+                            q_x, q_seqlens, q_maxlen, kv_cc, kv_seq_c7, kv_max_c7
                         )
                         cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
                         if b_idx == 0 and not uncond:
@@ -1916,10 +1928,8 @@ class OptimizedLatDitRunner:
                             cond_msa_proj = block.cond_to_out(h_cond.reshape(batch_size, L, D))
                             if b_idx == 0 and not uncond:
                                 self._last_b0_cond_msa_out = cond_msa_proj
-                            if not locals().get("b7_carved", False):
-                                b7_carved = False
                             if (
-                                (not b7_carved)
+                                (L == kv_maxlen_full)
                                 and (
                                     (use_b0_carve and b_idx == 0 and cached_cond_block7 is None)
                                     or (use_b7_carve and b_idx == self.cond_depth - 1)
@@ -1962,15 +1972,12 @@ class OptimizedLatDitRunner:
                                         )
                                         geom[rope2d_sub_key] = rope2d_sub
                                     cos_cond_2d, sin_cond_2d = rope2d_sub
-                                b7_carved = True
                             if use_cond_msa_stride:
                                 prev_cond_msa_proj = cond_msa_proj
                             cond, h_cond_cr = fast_gate_add_and_modulate_cond(
                                 cond, cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
                             )
 
-                        if not locals().get("b7_carved", False):
-                            b7_carved = False
                         h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
                         if L != kv_maxlen_full:
                             c_key = f"kv_seqlens_nc_{L}"
@@ -2017,7 +2024,7 @@ class OptimizedLatDitRunner:
                                 kv_cc = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)[:, 1:]
                         elif (
                             (b_idx >= 1)
-                            and (not b7_carved)
+                            and (L == kv_maxlen_full)
                             and (cond_kv_qmc_stride > 1)
                             and return_mid_delta
                             and (not need_full_kv_cc)
@@ -2078,8 +2085,8 @@ class OptimizedLatDitRunner:
                                 q_seqlens,
                                 q_maxlen,
                                 kv_cc,
-                                kv_seqlens_full,
-                                kv_maxlen_full,
+                                kv_seq_cond_cr,
+                                kv_max_cond_cr,
                             )
                             cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
                             if b_idx == 0 and not uncond:
@@ -2262,12 +2269,12 @@ class OptimizedLatDitRunner:
                         ln_cond_after_7 = fast_layer_norm(cond)
                     if (
                         (not uncond)
-                        and (not locals().get("b7_carved", False))
+                        and (ln_cond_after_7 is not None)
+                        and (ln_cond_after_7.shape[1] == kv_maxlen_full)
                         and (nc_dino_stride > 1)
                         and return_mid_delta
                         and (not need_full_kv_cc)
                         and batch_size == 1
-                        and ln_cond_after_7 is not None
                         and ln_cond_after_7.shape[1] > 16
                     ):
                         # ClusCa (ACM MM 2025, arXiv:2509.10312) + MC-Sparse (arXiv:2610.06801)
@@ -2304,8 +2311,20 @@ class OptimizedLatDitRunner:
                     h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
                     q_x = block.to_q_cross(h_x).view(N, H, HD)
                     kv_cc = cached_cond_block7[b_idx]
+                    l_c7 = kv_cc.shape[0] // batch_size
+                    if l_c7 == kv_maxlen_full:
+                        kv_seq_c7, kv_max_c7 = kv_seqlens_full, kv_maxlen_full
+                    else:
+                        c7_key = f"kv_seqlens_nc_{l_c7}"
+                        kv_seq_c7 = geom.get(c7_key)
+                        if kv_seq_c7 is None:
+                            kv_seq_c7 = torch.arange(
+                                0, (batch_size + 1) * l_c7, l_c7, device=device, dtype=torch.int32
+                            )
+                            geom[c7_key] = kv_seq_c7
+                        kv_max_c7 = l_c7
                     h_x_out = flash_cross_attn(
-                        q_x, q_seqlens, q_maxlen, kv_cc, kv_seqlens_full, kv_maxlen_full
+                        q_x, q_seqlens, q_maxlen, kv_cc, kv_seq_c7, kv_max_c7
                     )
                     cr_out_for_x = block.to_out_cross(h_x_out.reshape(N, D))
                 elif will_reuse_nc_cr and prev_nc_cr_out is not None:
@@ -2478,10 +2497,10 @@ class OptimizedLatDitRunner:
         return out
 
     @torch.no_grad()
-    def warmup(self) -> None:
+    def warmup(self, force_cpu: bool = False) -> None:
         """Run a tiny dummy pass at load time to warm up CUDA/Triton/FlashAttention kernels."""
         device = self._runtime_device()
-        if device.type != "cuda":
+        if device.type != "cuda" and not force_cpu:
             return
         try:
             dummy_vox = [torch.arange(64, device=device, dtype=torch.int32).unsqueeze(-1).repeat(1, 3)]
@@ -2494,9 +2513,11 @@ class OptimizedLatDitRunner:
                 num_inference_steps=50,
             )
             self.sample_fast(dummy_vox, dummy_cond, sampling=dummy_sampling)
-            torch.cuda.synchronize(device)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
         except Exception:
-            pass
+            if force_cpu:
+                raise
 
     @torch.no_grad()
     def sample_fast(

@@ -87,12 +87,14 @@ def test_pytorch_pipeline() -> None:
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # Build a small-depth synthetic LatDitModel with the exact competition config (except depth=4 for fast test)
+    # Build a multi-block synthetic LatDitModel with the exact competition config
+    # (depth=8, cond_depth=5 covers b_idx=0, odd reuse b_idx=1,3, hierarchical even b_idx=2,
+    # terminal cond block b_idx=4, and non-cond even/odd/terminal blocks b_idx=5,6,7!)
     with open(_ROOT / "weights" / "config.json", encoding="utf-8") as f:
         raw_cfg = json.load(f)
     raw_cfg["model_config"] = dict(raw_cfg["model_config"])
-    raw_cfg["model_config"]["depth"] = 4
-    raw_cfg["model_config"]["cond_depth"] = 2
+    raw_cfg["model_config"]["depth"] = 8
+    raw_cfg["model_config"]["cond_depth"] = 5
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -174,12 +176,20 @@ def test_pytorch_pipeline() -> None:
             beta9 = compute_stork2_beta(9)
             assert abs(beta9 - 0.46283549) < 1e-6, f"Unexpected STORK-2 beta_9: {beta9}"
 
-            # Test full generate() call and metadata recording
+            # Test warmup(force_cpu=True) without exception suppression
+            sol_model.runner.warmup(force_cpu=True)
+
+            # Test full generate() call with standard competition sampling params (num_inference_steps=50)
             g = torch.Generator(device=device).manual_seed(123)
             out_latents = sol_model.generate(
                 [vox_t],
                 conditioning=cond_input,
-                sampling=FlowMatchSamplingParams(num_inference_steps=4),
+                sampling=FlowMatchSamplingParams(
+                    guidance_scale=7.0,
+                    cfg_range=(0.5, 1.0),
+                    rescale_t=3.0,
+                    num_inference_steps=50,
+                ),
                 generator=g,
             )
             assert isinstance(out_latents, list) and len(out_latents) == 1
@@ -187,6 +197,10 @@ def test_pytorch_pipeline() -> None:
             assert torch.isfinite(out_latents[0]).all()
             assert getattr(sol_model.runner, "_last_pos_x_without_cr", None) is not None
             assert getattr(sol_model.runner, "_last_pos_kv_x_list", None) is not None
+            assert len(sol_model.runner._last_pos_kv_x_list) == sol_model.runner.cond_depth, (
+                f"Expected _last_pos_kv_x_list len {sol_model.runner.cond_depth}, "
+                f"got {len(sol_model.runner._last_pos_kv_x_list)}"
+            )
             assert getattr(sol_model.runner.flow.blocks[0].qk_norm._q_scale_cast, "_qk_stacked", None) is not None
             assert getattr(sol_model.runner.flow.blocks[0], "_cond_to_q_cross_slice_w", None) is not None
             from lib.fast_sampler import (
@@ -255,7 +269,12 @@ def test_pytorch_pipeline() -> None:
                 out_ac = sol_model.generate(
                     [vox_t],
                     conditioning=cond_input,
-                    sampling=FlowMatchSamplingParams(num_inference_steps=4),
+                    sampling=FlowMatchSamplingParams(
+                        guidance_scale=7.0,
+                        cfg_range=(0.5, 1.0),
+                        rescale_t=3.0,
+                        num_inference_steps=50,
+                    ),
                     generator=g_ac,
                 )
             assert out_ac[0].dtype == torch.float32, f"Expected float32 output under autocast, got {out_ac[0].dtype}"
