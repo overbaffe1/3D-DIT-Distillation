@@ -14,15 +14,15 @@ weights_dir: None
 errors: []
 notes: ['missing non-empty weights/; eval will use organizer lat_dit weights']
 
-Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (75.3 KB)
+Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (77.7 KB)
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=['missing non-empty weights/; eval will use organizer lat_dit weights']
    [PASS] Submission format verified.
 2. Testing Solution class contract & numerical equivalence...
-   pos_pred max_abs_diff=1.43e-06, cos_sim=0.99999976
-   neg_pred (1-token vs 4101-token) max_abs_diff=3.58e-06, cos_sim=1.00000012
-   generate() output shape=(512, 16), metadata={'generator_class': 'solution.Solution', 'inputs': {'sampling': {'guidance_scale': 2.5, 'cfg_range': [0.5, 1.0], 'rescale_t': 3.0, 'num_inference_steps': 4}, 'sampling_kwargs': {}, 'batch_size': 1, 'num_voxels': [512], 'generator_seed': 123}, 'elapsed_seconds': 38.83056830200002, 'status': 'ok'}
+   pos_pred max_abs_diff=1.19e-06, cos_sim=0.99999976
+   neg_pred (1-token vs 4101-token) max_abs_diff=3.40e-06, cos_sim=1.00000024
+   generate() output shape=(512, 16), metadata={'generator_class': 'solution.Solution', 'inputs': {'sampling': {'guidance_scale': 2.5, 'cfg_range': [0.5, 1.0], 'rescale_t': 3.0, 'num_inference_steps': 4}, 'sampling_kwargs': {}, 'batch_size': 1, 'num_voxels': [512], 'generator_seed': 123}, 'elapsed_seconds': 3.9160211939999954, 'status': 'ok'}
    [PASS] PyTorch pipeline & numerical equivalence verified.
 3. Testing AOT Triton kernel compilation for NVIDIA A100 (sm_80)...
    [AOT sm_80 OK] _encode_hilbert_4_kernel: 325130 bytes PTX
@@ -33,16 +33,16 @@ Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-D
    [AOT sm_80 OK] _fused_qknorm_rope2d_cond_inplace_kernel: 31878 bytes PTX
    [PASS] All 6 Triton kernels AOT-compiled cleanly for NVIDIA A100 (sm_80).
 Streaming flow.blocks.0.* real pretrained weights sequentially...
-Loaded 3 real pretrained tensors from flow.blocks.0 in 16.5s
-[Equivalence] pos_pred: max_diff=1.01e-06, cos=1.00000024, time=3.331s -> 3.342s
-[Equivalence] neg_pred (1-token vs 4101-token): max_diff=2.50e-06, cos=0.99999994, time=3.362s -> 0.331s (10.15x faster)
+Loaded 3 real pretrained tensors from flow.blocks.0 in 12.6s
+[Equivalence] pos_pred: max_diff=9.54e-07, cos=1.00000024, time=3.017s -> 2.906s
+[Equivalence] neg_pred (1-token vs 4101-token): max_diff=2.53e-06, cos=0.99999994, time=2.984s -> 0.294s (10.16x faster)
 
 Running 50-step baseline teacher trajectory...
-Teacher 50-step finished in 1.49s
-  euler_20_naive                    : rel_l2=0.3131, cos=0.957711, speedup=2.31x
-  piecewise_euler_20_exact          : rel_l2=0.2806, cos=0.959877, speedup=2.60x
-  piecewise_ab2_20_exact            : rel_l2=0.2806, cos=0.959877, speedup=2.61x
-  piecewise_ab2_16_stride2_reuse    : rel_l2=0.2606, cos=0.966208, speedup=2.56x
-  piecewise_ab2_16_stride2_extrap   : rel_l2=0.3101, cos=0.950950, speedup=3.00x
-  piecewise_ab2_14_stride2_extrap   : rel_l2=0.4874, cos=0.878472, speedup=3.06x
-  piecewise_ab2_12_stride2_extrap   : rel_l2=0.3600, cos=0.936937, speedup=3.12x
+Teacher 50-step finished in 1.35s
+  euler_20_naive                    : rel_l2=0.3132, cos=0.957769, speedup=2.34x
+  piecewise_euler_20_exact          : rel_l2=0.2804, cos=0.959946, speedup=2.68x
+  piecewise_ab2_20_exact            : rel_l2=0.2804, cos=0.959946, speedup=2.68x
+  piecewise_ab2_16_stride2_reuse    : rel_l2=0.2603, cos=0.966236, speedup=2.61x
+  piecewise_ab2_16_stride2_extrap   : rel_l2=0.3099, cos=0.950989, speedup=3.10x
+  piecewise_ab2_14_stride2_extrap   : rel_l2=0.4875, cos=0.878484, speedup=3.10x
+  piecewise_ab2_12_stride2_extrap   : rel_l2=0.3607, cos=0.936855, speedup=3.15x
