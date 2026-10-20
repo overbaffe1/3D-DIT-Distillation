@@ -14,7 +14,7 @@ weights_dir: None
 errors: []
 notes: ['missing non-empty weights/; eval will use organizer lat_dit weights']
 
-Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (73.6 KB)
+Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip (75.1 KB)
 1. Testing submission format compliance...
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation, ok=True, errors=[], notes=[]
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=['missing non-empty weights/; eval will use organizer lat_dit weights']
@@ -22,19 +22,19 @@ Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-D
 2. Testing Solution class contract & numerical equivalence...
    pos_pred max_abs_diff=1.43e-06, cos_sim=0.99999976
    neg_pred (1-token vs 4101-token) max_abs_diff=3.58e-06, cos_sim=1.00000012
-   generate() output shape=(512, 16), metadata={'generator_class': 'solution.Solution', 'inputs': {'sampling': {'guidance_scale': 2.5, 'cfg_range': [0.5, 1.0], 'rescale_t': 3.0, 'num_inference_steps': 4}, 'sampling_kwargs': {}, 'batch_size': 1, 'num_voxels': [512], 'generator_seed': 123}, 'elapsed_seconds': 6.974801451000019, 'status': 'ok'}
+   generate() output shape=(512, 16), metadata={'generator_class': 'solution.Solution', 'inputs': {'sampling': {'guidance_scale': 2.5, 'cfg_range': [0.5, 1.0], 'rescale_t': 3.0, 'num_inference_steps': 4}, 'sampling_kwargs': {}, 'batch_size': 1, 'num_voxels': [512], 'generator_seed': 123}, 'elapsed_seconds': 6.424478342000015, 'status': 'ok'}
    [PASS] PyTorch pipeline & numerical equivalence verified.
 Streaming flow.blocks.0.* real pretrained weights sequentially...
 Warning during remotezip stream: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))
-[Equivalence] pos_pred: max_diff=9.09e-07, cos=1.00000024, time=3.358s -> 3.419s
-[Equivalence] neg_pred (1-token vs 4101-token): max_diff=2.86e-06, cos=1.00000012, time=3.432s -> 0.343s (9.99x faster)
+[Equivalence] pos_pred: max_diff=9.09e-07, cos=1.00000024, time=3.285s -> 3.266s
+[Equivalence] neg_pred (1-token vs 4101-token): max_diff=2.86e-06, cos=1.00000012, time=3.286s -> 0.329s (9.99x faster)
 
 Running 50-step baseline teacher trajectory...
-Teacher 50-step finished in 1.54s
-  euler_20_naive                    : rel_l2=0.2556, cos=0.968079, speedup=2.29x
-  piecewise_euler_20_exact          : rel_l2=0.2524, cos=0.968914, speedup=2.57x
-  piecewise_ab2_20_exact            : rel_l2=0.2524, cos=0.968914, speedup=2.57x
-  piecewise_ab2_16_stride2_reuse    : rel_l2=0.2336, cos=0.976217, speedup=2.56x
-  piecewise_ab2_16_stride2_extrap   : rel_l2=0.2783, cos=0.964680, speedup=2.97x
-  piecewise_ab2_14_stride2_extrap   : rel_l2=0.4508, cos=0.893257, speedup=2.98x
-  piecewise_ab2_12_stride2_extrap   : rel_l2=0.3534, cos=0.935550, speedup=3.12x
+Teacher 50-step finished in 1.49s
+  euler_20_naive                    : rel_l2=0.2556, cos=0.968082, speedup=2.25x
+  piecewise_euler_20_exact          : rel_l2=0.2524, cos=0.968916, speedup=2.58x
+  piecewise_ab2_20_exact            : rel_l2=0.2524, cos=0.968916, speedup=2.55x
+  piecewise_ab2_16_stride2_reuse    : rel_l2=0.2336, cos=0.976215, speedup=2.55x
+  piecewise_ab2_16_stride2_extrap   : rel_l2=0.2783, cos=0.964678, speedup=2.96x
+  piecewise_ab2_14_stride2_extrap   : rel_l2=0.4508, cos=0.893275, speedup=2.95x
+  piecewise_ab2_12_stride2_extrap   : rel_l2=0.3534, cos=0.935559, speedup=3.11x
