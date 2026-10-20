@@ -194,12 +194,134 @@ def test_pytorch_pipeline() -> None:
             assert 0.20 <= r_cab <= 1.5
             w_c, w_p1, w_p2 = compute_stork4_rock4_weights(0.20, 0.18, 0.15)
             assert abs(w_c + w_p1 + w_p2) < 1e-6 and w_c > 0.0 and w_p1 < 0.0 and w_p2 > 0.0
+            # Test under bfloat16 autocast (mirrors `with stage_autocast("lat_dit", device):` in LatDitStage.run)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                g_ac = torch.Generator(device=device).manual_seed(123)
+                out_ac = sol_model.generate(
+                    [vox_t],
+                    conditioning=cond_input,
+                    sampling=FlowMatchSamplingParams(num_inference_steps=4),
+                    generator=g_ac,
+                )
+            assert out_ac[0].dtype == torch.float32, f"Expected float32 output under autocast, got {out_ac[0].dtype}"
+            assert torch.isfinite(out_ac[0]).all()
             meta = sol_model.last_run_metadata
             assert meta is not None and "elapsed_seconds" in meta and meta.get("status") == "ok"
             print(f"   generate() output shape={tuple(out_latents[0].shape)}, metadata={meta}")
             print("   [PASS] PyTorch pipeline & numerical equivalence verified.")
 
 
+def test_triton_aot_compile_sm80() -> None:
+    """
+    AOT-compile every @triton.jit kernel in `lib/fast_kernels.py` to PTX/cubin targeting
+    NVIDIA A100 (`sm_80`, warp_size=32) using `triton.compiler.compile` even on a CPU runner!
+    Catches any Triton DSL syntax/type errors (such as missing `tl.*` builtins or constexpr issues).
+    """
+    try:
+        import triton
+        from triton.backends.compiler import GPUTarget
+        from triton.compiler import ASTSource, compile as triton_compile
+    except ImportError:
+        print("   [SKIP] Triton compiler not installed; skipping AOT sm_80 compilation test.")
+        return
+
+    import lib.fast_kernels as fk
+
+    print("3. Testing AOT Triton kernel compilation for NVIDIA A100 (sm_80)...")
+    target = GPUTarget("cuda", 80, 32)
+
+    specs = [
+        (
+            "_encode_hilbert_4_kernel",
+            fk._encode_hilbert_4_kernel,
+            {"xyz_ptr": "*i32", "codes_ptr": "*i64", "N": "i32", "str_xyz_N": "i32", "str_xyz_C": "i32"},
+            {"BLK": 256},
+        ),
+        (
+            "_fused_gate_add_ln_modulate_kernel",
+            fk._fused_gate_add_ln_modulate_kernel,
+            {
+                "X_ptr": "*bf16",
+                "H_ptr": "*bf16",
+                "G_ptr": "*bf16",
+                "W_ptr": "*bf16",
+                "B_ptr": "*bf16",
+                "X_OUT_ptr": "*bf16",
+                "MOD_OUT_ptr": "*bf16",
+                "ACC_ptr": "*bf16",
+                "M": "i32",
+                "H_STRIDE_ROW": "i32",
+            },
+            {
+                "D": 1536,
+                "eps": 1e-6,
+                "BLOCK_D": 2048,
+                "HAS_ACC": True,
+                "INIT_ACC": False,
+                "APPLY_AFFINE": True,
+                "STORE_X": True,
+            },
+        ),
+        (
+            "_fused_out_modulate_unpatchify_kernel",
+            fk._fused_out_modulate_unpatchify_kernel,
+            {
+                "X_ptr": "*bf16",
+                "W_MOD_ptr": "*bf16",
+                "B_MOD_ptr": "*bf16",
+                "W_UNPATCH_ptr": "*fp32",
+                "OUT_ptr": "*fp32",
+                "M": "i32",
+            },
+            {"D": 1536, "C_OUT": 16, "eps": 1e-6, "BLOCK_D": 2048},
+        ),
+        (
+            "_fused_packed_swiglu_kernel",
+            fk._fused_packed_swiglu_kernel,
+            {"IN_ptr": "*bf16", "OUT_ptr": "*bf16", "M": "i32", "D_half": "i32"},
+            {"BLOCK_D": 1024},
+        ),
+        (
+            "_fused_qknorm_rope3d_gather_kernel",
+            fk._fused_qknorm_rope3d_gather_kernel,
+            {
+                "qkv_ptr": "*bf16",
+                "q_scale_ptr": "*bf16",
+                "k_scale_ptr": "*bf16",
+                "cos_ptr": "*fp32",
+                "sin_ptr": "*fp32",
+                "coords_ptr": "*i32",
+                "fwd_idx_ptr": "*i64",
+                "out_qkv_ptr": "*bf16",
+                "N": "i32",
+            },
+            {"H": 16, "Q": 16, "USE_TABLE": True, "eps": 1e-6},
+        ),
+        (
+            "_fused_qknorm_rope2d_cond_inplace_kernel",
+            fk._fused_qknorm_rope2d_cond_inplace_kernel,
+            {
+                "qkv_ptr": "*bf16",
+                "q_scale_ptr": "*bf16",
+                "k_scale_ptr": "*bf16",
+                "cos2d_ptr": "*fp32",
+                "sin2d_ptr": "*fp32",
+                "L": "i32",
+            },
+            {"H": 16, "prefix_tokens": 5, "eps": 1e-6},
+        ),
+    ]
+
+    for name, fn, sig, constexprs in specs:
+        src = ASTSource(fn=fn, signature=sig, constexprs=constexprs)
+        compiled = triton_compile(src, target=target)
+        ptx_code = compiled.asm.get("ptx", "")
+        assert len(ptx_code) > 100, f"PTX generation failed for {name}"
+        print(f"   [AOT sm_80 OK] {name}: {len(ptx_code)} bytes PTX")
+    print("   [PASS] All 6 Triton kernels AOT-compiled cleanly for NVIDIA A100 (sm_80).")
+
+
 if __name__ == "__main__":
     test_submission_format()
     test_pytorch_pipeline()
+    test_triton_aot_compile_sm80()

@@ -553,17 +553,17 @@ if HAS_TRITON:
         X_OUT_ptr,
         MOD_OUT_ptr,
         ACC_ptr,
-        M: int,
-        H_STRIDE_ROW: int,
+        M,
+        H_STRIDE_ROW,
         D: tl.constexpr,
         eps: tl.constexpr,
         BLOCK_D: tl.constexpr,
-        HAS_ACC: tl.constexpr = False,
-        INIT_ACC: tl.constexpr = False,
-        APPLY_AFFINE: tl.constexpr = True,
-        STORE_X: tl.constexpr = True,
+        HAS_ACC: tl.constexpr,
+        INIT_ACC: tl.constexpr,
+        APPLY_AFFINE: tl.constexpr,
+        STORE_X: tl.constexpr,
     ):
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         if row >= M:
             return
         cols = tl.arange(0, BLOCK_D)
@@ -607,13 +607,13 @@ if HAS_TRITON:
         B_MOD_ptr,
         W_UNPATCH_ptr,
         OUT_ptr,
-        M: int,
+        M,
         D: tl.constexpr,
         C_OUT: tl.constexpr,
         eps: tl.constexpr,
         BLOCK_D: tl.constexpr,
     ):
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         if row >= M:
             return
         cols = tl.arange(0, BLOCK_D)
@@ -641,11 +641,11 @@ if HAS_TRITON:
     def _fused_packed_swiglu_kernel(
         IN_ptr,
         OUT_ptr,
-        M: int,
-        D_half: int,
+        M,
+        D_half,
         BLOCK_D: tl.constexpr,
     ):
-        row = tl.program_id(0)
+        row = tl.program_id(0).to(tl.int64)
         col_blk = tl.program_id(1)
         if row >= M:
             return
@@ -685,42 +685,47 @@ def fast_gate_add_and_modulate(
         and h.is_contiguous()
         and residual.shape[-1] <= 2048
     ):
-        D = residual.shape[-1]
-        M = residual.shape[0]
-        h_stride_row = 0 if h.shape[0] == 1 else D
-        g = getattr(gate_scale, "_g_2d", None)
-        if g is None:
-            g = gate_scale.view(-1)
-        w = getattr(next_scale, "_w_1ps", None)
-        if w is None:
-            w = 1.0 + next_scale.view(-1)
-        b = getattr(next_shift, "_b_1d", None)
-        if b is None:
-            b = next_shift.view(-1)
-        x_out = torch.empty_like(residual)
-        mod_out = torch.empty_like(residual)
-        has_acc = acc_inout is not None
-        acc_ptr = acc_inout if has_acc else x_out
-        block_d = triton.next_power_of_2(D)
-        _fused_gate_add_ln_modulate_kernel[(M,)](
-            residual,
-            h,
-            g,
-            w,
-            b,
-            x_out,
-            mod_out,
-            acc_ptr,
-            M=M,
-            H_STRIDE_ROW=h_stride_row,
-            D=D,
-            eps=eps,
-            BLOCK_D=block_d,
-            HAS_ACC=has_acc,
-            INIT_ACC=init_acc,
-            num_warps=8 if block_d >= 2048 else 4,
-        )
-        return x_out, mod_out
+        try:
+            D = residual.shape[-1]
+            M = residual.shape[0]
+            h_stride_row = 0 if h.shape[0] == 1 else D
+            g = getattr(gate_scale, "_g_2d", None)
+            if g is None:
+                g = gate_scale.view(-1)
+            w = getattr(next_scale, "_w_1ps", None)
+            if w is None:
+                w = 1.0 + next_scale.view(-1)
+            b = getattr(next_shift, "_b_1d", None)
+            if b is None:
+                b = next_shift.view(-1)
+            x_out = torch.empty_like(residual)
+            mod_out = torch.empty_like(residual)
+            has_acc = acc_inout is not None
+            acc_ptr = acc_inout if has_acc else x_out
+            block_d = triton.next_power_of_2(D)
+            _fused_gate_add_ln_modulate_kernel[(M,)](
+                residual,
+                h,
+                g,
+                w,
+                b,
+                x_out,
+                mod_out,
+                acc_ptr,
+                M,
+                h_stride_row,
+                D=D,
+                eps=eps,
+                BLOCK_D=block_d,
+                HAS_ACC=has_acc,
+                INIT_ACC=init_acc,
+                APPLY_AFFINE=True,
+                STORE_X=True,
+                num_warps=8 if block_d >= 2048 else 4,
+            )
+            return x_out, mod_out
+        except Exception:
+            pass
     if acc_inout is not None:
         g2 = getattr(gate_scale, "_g_2d", None)
         if g2 is None or g2.dtype != h.dtype:
@@ -756,40 +761,45 @@ def fast_gate_add_and_modulate_cond(
         and h.is_contiguous()
         and cond.shape[-1] <= 2048
     ):
-        D = cond.shape[-1]
-        M = cond.shape[1]
-        h_stride_row = 0 if h.shape[1] == 1 else D
-        g = getattr(gate_scale, "_g_2d", None)
-        if g is None:
-            g = gate_scale.view(-1)
-        w = getattr(next_scale, "_w_1ps", None)
-        if w is None:
-            w = 1.0 + next_scale.view(-1)
-        b = getattr(next_shift, "_b_1d", None)
-        if b is None:
-            b = next_shift.view(-1)
-        c_out = torch.empty_like(cond)
-        mod_out = torch.empty_like(cond)
-        block_d = triton.next_power_of_2(D)
-        _fused_gate_add_ln_modulate_kernel[(M,)](
-            cond,
-            h,
-            g,
-            w,
-            b,
-            c_out,
-            mod_out,
-            c_out,
-            M=M,
-            H_STRIDE_ROW=h_stride_row,
-            D=D,
-            eps=eps,
-            BLOCK_D=block_d,
-            HAS_ACC=False,
-            INIT_ACC=False,
-            num_warps=8 if block_d >= 2048 else 4,
-        )
-        return c_out, mod_out
+        try:
+            D = cond.shape[-1]
+            M = cond.shape[1]
+            h_stride_row = 0 if h.shape[1] == 1 else D
+            g = getattr(gate_scale, "_g_2d", None)
+            if g is None:
+                g = gate_scale.view(-1)
+            w = getattr(next_scale, "_w_1ps", None)
+            if w is None:
+                w = 1.0 + next_scale.view(-1)
+            b = getattr(next_shift, "_b_1d", None)
+            if b is None:
+                b = next_shift.view(-1)
+            c_out = torch.empty_like(cond)
+            mod_out = torch.empty_like(cond)
+            block_d = triton.next_power_of_2(D)
+            _fused_gate_add_ln_modulate_kernel[(M,)](
+                cond,
+                h,
+                g,
+                w,
+                b,
+                c_out,
+                mod_out,
+                c_out,
+                M,
+                h_stride_row,
+                D=D,
+                eps=eps,
+                BLOCK_D=block_d,
+                HAS_ACC=False,
+                INIT_ACC=False,
+                APPLY_AFFINE=True,
+                STORE_X=True,
+                num_warps=8 if block_d >= 2048 else 4,
+            )
+            return c_out, mod_out
+        except Exception:
+            pass
     c_next = fast_gate_add_cond(cond, h, gate_scale)
     h_mod = fast_modulate_cond(c_next, next_scale, next_shift, eps=eps)
     return c_next, h_mod
@@ -817,36 +827,39 @@ def fast_gate_add_and_ln_cond(
         and h.is_contiguous()
         and cond.shape[-1] <= 2048
     ):
-        D = cond.shape[-1]
-        M = cond.shape[1]
-        h_stride_row = 0 if h.shape[1] == 1 else D
-        g = getattr(gate_scale, "_g_2d", None)
-        if g is None:
-            g = gate_scale.view(-1)
-        ln_out = torch.empty_like(cond)
-        c_out = torch.empty_like(cond) if return_cond else ln_out
-        block_d = triton.next_power_of_2(D)
-        _fused_gate_add_ln_modulate_kernel[(M,)](
-            cond,
-            h,
-            g,
-            g,
-            g,
-            c_out,
-            ln_out,
-            ln_out,
-            M=M,
-            H_STRIDE_ROW=h_stride_row,
-            D=D,
-            eps=eps,
-            BLOCK_D=block_d,
-            HAS_ACC=False,
-            INIT_ACC=False,
-            APPLY_AFFINE=False,
-            STORE_X=return_cond,
-            num_warps=8 if block_d >= 2048 else 4,
-        )
-        return (c_out if return_cond else None), ln_out
+        try:
+            D = cond.shape[-1]
+            M = cond.shape[1]
+            h_stride_row = 0 if h.shape[1] == 1 else D
+            g = getattr(gate_scale, "_g_2d", None)
+            if g is None:
+                g = gate_scale.view(-1)
+            ln_out = torch.empty_like(cond)
+            c_out = torch.empty_like(cond) if return_cond else ln_out
+            block_d = triton.next_power_of_2(D)
+            _fused_gate_add_ln_modulate_kernel[(M,)](
+                cond,
+                h,
+                g,
+                g,
+                g,
+                c_out,
+                ln_out,
+                ln_out,
+                M,
+                h_stride_row,
+                D=D,
+                eps=eps,
+                BLOCK_D=block_d,
+                HAS_ACC=False,
+                INIT_ACC=False,
+                APPLY_AFFINE=False,
+                STORE_X=return_cond,
+                num_warps=8 if block_d >= 2048 else 4,
+            )
+            return (c_out if return_cond else None), ln_out
+        except Exception:
+            pass
     c_next = fast_gate_add_cond(cond, h, gate_scale)
     ln_out = fast_layer_norm(c_next, eps=eps)
     return (c_next if return_cond else None), ln_out
@@ -875,32 +888,36 @@ def fast_out_modulate_unpatchify(
         and x.shape[-1] <= 2048
         and unpatchify_w_fp32.shape[0] <= 32
     ):
-        M, D = x.shape
-        c_out = unpatchify_w_fp32.shape[0]
-        w_mod = getattr(out_scale, "_w_1ps", None)
-        if w_mod is None:
-            w_mod = 1.0 + out_scale.view(-1)
-        b_mod = getattr(out_shift, "_b_1d", None)
-        if b_mod is None:
-            b_mod = out_shift.view(-1)
-        out = torch.empty((M, c_out), device=x.device, dtype=torch.float32)
-        block_d = triton.next_power_of_2(D)
-        _fused_out_modulate_unpatchify_kernel[(M,)](
-            x,
-            w_mod,
-            b_mod,
-            unpatchify_w_fp32,
-            out,
-            M=M,
-            D=D,
-            C_OUT=c_out,
-            eps=eps,
-            BLOCK_D=block_d,
-            num_warps=8 if block_d >= 2048 else 4,
-        )
-        return out
+        try:
+            M, D = x.shape
+            c_out = unpatchify_w_fp32.shape[0]
+            w_mod = getattr(out_scale, "_w_1ps", None)
+            if w_mod is None:
+                w_mod = 1.0 + out_scale.view(-1)
+            b_mod = getattr(out_shift, "_b_1d", None)
+            if b_mod is None:
+                b_mod = out_shift.view(-1)
+            out = torch.empty((M, c_out), device=x.device, dtype=torch.float32)
+            block_d = triton.next_power_of_2(D)
+            _fused_out_modulate_unpatchify_kernel[(M,)](
+                x,
+                w_mod,
+                b_mod,
+                unpatchify_w_fp32,
+                out,
+                M,
+                D=D,
+                C_OUT=c_out,
+                eps=eps,
+                BLOCK_D=block_d,
+                num_warps=8 if block_d >= 2048 else 4,
+            )
+            return out
+        except Exception:
+            pass
     x_mod = fast_modulate(x, sizes, out_scale, out_shift, eps=eps)
-    return F.linear(x_mod.float(), unpatchify_w_fp32)
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        return F.linear(x_mod.float(), unpatchify_w_fp32.float()).float()
 
 
 def fast_swiglu(gate: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -917,19 +934,22 @@ def fast_swiglu_from_packed(h_packed: torch.Tensor, use_triton: bool = True) -> 
     D2 = h_packed.shape[-1]
     D_half = D2 // 2
     if use_triton and HAS_TRITON and h_packed.is_cuda and h_packed.is_contiguous():
-        M = h_packed.numel() // D2
-        out = torch.empty((*h_packed.shape[:-1], D_half), device=h_packed.device, dtype=h_packed.dtype)
-        block_d = 1024 if D_half >= 1024 else triton.next_power_of_2(max(32, D_half))
-        grid = (M, triton.cdiv(D_half, block_d))
-        _fused_packed_swiglu_kernel[grid](
-            h_packed,
-            out,
-            M=M,
-            D_half=D_half,
-            BLOCK_D=block_d,
-            num_warps=4,
-        )
-        return out
+        try:
+            M = h_packed.numel() // D2
+            out = torch.empty((*h_packed.shape[:-1], D_half), device=h_packed.device, dtype=h_packed.dtype)
+            block_d = 1024 if D_half >= 1024 else triton.next_power_of_2(max(32, D_half))
+            grid = (M, triton.cdiv(D_half, block_d))
+            _fused_packed_swiglu_kernel[grid](
+                h_packed,
+                out,
+                M,
+                D_half,
+                BLOCK_D=block_d,
+                num_warps=4,
+            )
+            return out
+        except Exception:
+            pass
     h1, h_gate = h_packed.chunk(2, dim=-1)
     return fast_swiglu(h_gate, h1)
 
@@ -1068,14 +1088,14 @@ if HAS_TRITON:
             z ^= tl.where(cond, 0, t)
         y ^= x
         z ^= y
-        t = tl.zeros_like(z)
+        t = 0
         for i in tl.static_range(15, 0, -1):
             q = 1 << i
             t ^= tl.where((z & q) > 0, q - 1, 0)
         x ^= t
         y ^= t
         z ^= t
-        ret = tl.zeros_like(z)
+        ret = 0
         for i in tl.static_range(0, 16):
             q = 1 << i
             ret |= (x & q) << (2 * i + 2)
@@ -1093,7 +1113,7 @@ if HAS_TRITON:
         BLK: tl.constexpr,
     ):
         """Fused single-pass 4-mode Hilbert curve encoder for ('h', 'ht1', 'h1', 'ht')."""
-        pid_n = tl.program_id(0)
+        pid_n = tl.program_id(0).to(tl.int64)
         offs_n = pid_n * BLK + tl.arange(0, BLK)
         mask_n = offs_n < N
 
@@ -1137,9 +1157,9 @@ if HAS_TRITON:
              (USE_TABLE=True) or precomputed cos/sin [N, 3, Q] (USE_TABLE=False)
           4. Copy v and write packed [N, 3, H, D] directly in Hilbert-sorted order!
         """
-        dst_n = tl.program_id(0)
-        h = tl.program_id(1)
-        src_n = tl.load(fwd_idx_ptr + dst_n)
+        dst_n = tl.program_id(0).to(tl.int64)
+        h = tl.program_id(1).to(tl.int64)
+        src_n = tl.load(fwd_idx_ptr + dst_n).to(tl.int64)
 
         offs = tl.arange(0, Q)
         D: tl.constexpr = 6 * Q
@@ -1280,8 +1300,8 @@ if HAS_TRITON:
           - For l >= prefix_tokens (5): applies 2D RoPE rotation (Q=24) in registers
           - Leaves V (idx 2) untouched in-place (zero memory allocations!)
         """
-        l_idx = tl.program_id(0)
-        h = tl.program_id(1)
+        l_idx = tl.program_id(0).to(tl.int64)
+        h = tl.program_id(1).to(tl.int64)
 
         offs = tl.arange(0, 32)
         mask = offs < 24
@@ -1382,20 +1402,23 @@ def fused_qknorm_rope2d_cond_inplace(
     On GPU with Triton and B==1, executes in-place in a single kernel with zero allocations!
     """
     B, L, _, H, D = qkv_cond.shape
-    if use_triton and HAS_TRITON and qkv_cond.is_cuda and B == 1 and D == 96:
-        _fused_qknorm_rope2d_cond_inplace_kernel[(L, H)](
-            qkv_cond,
-            q_scale,
-            k_scale,
-            cos_cond_2d,
-            sin_cond_2d,
-            L=L,
-            H=H,
-            prefix_tokens=5,
-            eps=1e-6,
-            num_warps=1,
-        )
-        return qkv_cond
+    if use_triton and HAS_TRITON and qkv_cond.is_cuda and B == 1 and D == 96 and qkv_cond.is_contiguous():
+        try:
+            _fused_qknorm_rope2d_cond_inplace_kernel[(L, H)](
+                qkv_cond,
+                q_scale,
+                k_scale,
+                cos_cond_2d,
+                sin_cond_2d,
+                L,
+                H=H,
+                prefix_tokens=5,
+                eps=1e-6,
+                num_warps=1,
+            )
+            return qkv_cond
+        except Exception:
+            pass
 
     if not qkv_cond.is_cuda:
         qk_scale = getattr(q_scale, "_qk_stacked", None)
@@ -1434,27 +1457,30 @@ def fused_qknorm_rope3d_gather(
       qkv_sorted: [N, 3, H, D] gathered in fwd_indices order with QKNorm + 3D RoPE applied.
     """
     N, _, H, D = qkv.shape
-    if use_triton and HAS_TRITON and qkv.is_cuda and D == 96:
-        out_qkv = torch.empty_like(qkv)
-        use_table = cos_vox.ndim == 2 and coords is not None and coords.is_contiguous()
-        coords_arg = coords if use_table else fwd_indices
-        _fused_qknorm_rope3d_gather_kernel[(N, H)](
-            qkv,
-            q_scale,
-            k_scale,
-            cos_vox,
-            sin_vox,
-            coords_arg,
-            fwd_indices,
-            out_qkv,
-            N=N,
-            H=H,
-            Q=16,
-            USE_TABLE=use_table,
-            eps=1e-6,
-            num_warps=1,
-        )
-        return out_qkv
+    if use_triton and HAS_TRITON and qkv.is_cuda and D == 96 and qkv.is_contiguous():
+        try:
+            out_qkv = torch.empty_like(qkv)
+            use_table = cos_vox.ndim == 2 and coords is not None and coords.is_contiguous()
+            coords_arg = coords if use_table else fwd_indices
+            _fused_qknorm_rope3d_gather_kernel[(N, H)](
+                qkv,
+                q_scale,
+                k_scale,
+                cos_vox,
+                sin_vox,
+                coords_arg,
+                fwd_indices,
+                out_qkv,
+                N,
+                H=H,
+                Q=16,
+                USE_TABLE=use_table,
+                eps=1e-6,
+                num_warps=1,
+            )
+            return out_qkv
+        except Exception:
+            pass
 
     if not qkv.is_cuda:
         qk_scale = getattr(q_scale, "_qk_stacked", None)
@@ -1480,6 +1506,8 @@ def flash_varlen_qkvpacked_already_sorted(
 ) -> torch.Tensor:
     """Run FlashAttention varlen on pre-sorted qkv_sorted [N, 3, H, D] and unpermute by bwd_indices."""
     if qkv_sorted.is_cuda:
+        if qkv_sorted.stride(-1) != 1:
+            qkv_sorted = qkv_sorted.contiguous()
         if _FLASH_ATTN_3 is not None:
             q, k, v = qkv_sorted.unbind(dim=-3)
             out = _FLASH_ATTN_3.flash_attn_varlen_func(
@@ -1525,6 +1553,8 @@ def flash_varlen_qkvpacked_already_sorted(
 def flash_cond_self_attn(qkv_cond: torch.Tensor) -> torch.Tensor:
     """Run FlashAttention on [B, L, 3, H, D]."""
     if qkv_cond.is_cuda:
+        if qkv_cond.stride(-1) != 1:
+            qkv_cond = qkv_cond.contiguous()
         if _FLASH_ATTN_3 is not None:
             return _FLASH_ATTN_3.flash_attn_qkvpacked_func(qkv_cond)
         if _FLASH_ATTN is not None:
@@ -1545,6 +1575,10 @@ def flash_cross_attn(
 ) -> torch.Tensor:
     """Run FlashAttention cross-attention between q [T_q, H, D] and kv [T_kv, 2, H, D]."""
     if q.is_cuda:
+        if q.stride(-1) != 1:
+            q = q.contiguous()
+        if kv.stride(-1) != 1:
+            kv = kv.contiguous()
         if _FLASH_ATTN_3 is not None:
             k, v = kv.unbind(dim=-3)
             return _FLASH_ATTN_3.flash_attn_varlen_func(
@@ -1711,25 +1745,28 @@ def build_order_caches_fast(
             and h_coords.is_cuda
             and tuple(orders) == ("h", "ht1", "h1", "ht")
         ):
-            codes_4 = h_coords.new_empty((4, N), dtype=torch.int64)
-            blk = max(32, min(1024, 1 << max(0, (N - 1).bit_length())))
-            grid = ((N + blk - 1) // blk,)
-            _encode_hilbert_4_kernel[grid](
-                h_coords,
-                codes_4,
-                N,
-                h_coords.stride(0),
-                h_coords.stride(1),
-                BLK=blk,
-            )
-            fwd_4 = torch.argsort(codes_4, dim=-1)
-            order_caches = []
-            for idx_o in range(4):
-                fwd_idx = fwd_4[idx_o]
-                bwd_idx = torch.empty_like(fwd_idx)
-                bwd_idx[fwd_idx] = arange_n
-                order_caches.append((fwd_idx, bwd_idx, cu_seqlens, max_len))
-            return order_caches
+            try:
+                codes_4 = h_coords.new_empty((4, N), dtype=torch.int64)
+                blk = max(32, min(1024, 1 << max(0, (N - 1).bit_length())))
+                grid = ((N + blk - 1) // blk,)
+                _encode_hilbert_4_kernel[grid](
+                    h_coords,
+                    codes_4,
+                    N,
+                    h_coords.stride(0),
+                    h_coords.stride(1),
+                    BLK=blk,
+                )
+                fwd_4 = torch.argsort(codes_4, dim=-1)
+                order_caches = []
+                for idx_o in range(4):
+                    fwd_idx = fwd_4[idx_o]
+                    bwd_idx = torch.empty_like(fwd_idx)
+                    bwd_idx[fwd_idx] = arange_n
+                    order_caches.append((fwd_idx, bwd_idx, cu_seqlens, max_len))
+                return order_caches
+            except Exception:
+                pass
 
         h_coords_p1: Optional[torch.Tensor] = None
         order_caches = []

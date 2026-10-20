@@ -979,9 +979,13 @@ class OptimizedLatDitRunner:
                     )
                     qo_w = getattr(block, "_cond_1tok_q_and_out_cr_w", None) if use_1tok_collapse else None
                     if qo_w is not None:
-                        q_cc_flat, h_x_cross = F.linear(
-                            h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
-                        ).chunk(2, dim=-1)
+                        q_cc_flat, h_x_cross = (
+                            F.linear(
+                                h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
+                            )
+                            .view(2, 1, D)
+                            .unbind(0)
+                        )
                         q_cc = q_cc_flat.view(1, H, HD)
                     else:
                         q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
@@ -1297,9 +1301,13 @@ class OptimizedLatDitRunner:
                     else:
                         qo_w = getattr(block, "_cond_1tok_q_and_out_cr_w", None) if use_1tok_collapse else None
                         if qo_w is not None:
-                            q_cc_flat, h_x_cross = F.linear(
-                                h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
-                            ).chunk(2, dim=-1)
+                            q_cc_flat, h_x_cross = (
+                                F.linear(
+                                    h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
+                                )
+                                .view(2, 1, D)
+                                .unbind(0)
+                            )
                             q_cc = q_cc_flat.view(1, H, HD)
                         else:
                             q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
@@ -2265,7 +2273,9 @@ class OptimizedLatDitRunner:
                             )
                             cab_defect = v - (1.0 + r_cab) * prev_v + r_cab * prev2_v
                             v_norm_cab = (v * v).sum().clamp_min(1e-6)
-                            cab_res = 1.0 / (1.0 + pade_eta * ((cab_defect * cab_defect).sum() / v_norm_cab))
+                            cab_res = (1.0 / (1.0 + pade_eta * ((cab_defect * cab_defect).sum() / v_norm_cab))).to(
+                                dtype=v_step.dtype
+                            )
                             cab_phi2 = compute_flow_unipc_bh2_scale(t_val, t_next) if use_flow_unipc else 1.0
                             v_step = torch.addcmul(
                                 v_step,
@@ -2282,7 +2292,9 @@ class OptimizedLatDitRunner:
                             w_c, w_p1, w_p2 = compute_stork4_rock4_weights(h_p2, h_p1, dt)
                             rock4_curv = w_c * v + w_p1 * prev_v + w_p2 * prev2_v
                             v_norm_r4 = (v * v).sum().clamp_min(1e-6)
-                            rock4_res = 1.0 / (1.0 + pade_eta * ((rock4_curv * rock4_curv).sum() / v_norm_r4))
+                            rock4_res = (1.0 / (1.0 + pade_eta * ((rock4_curv * rock4_curv).sum() / v_norm_r4))).to(
+                                dtype=v_step.dtype
+                            )
                             v_step = torch.addcmul(
                                 v_step,
                                 rock4_curv,
@@ -2308,7 +2320,7 @@ class OptimizedLatDitRunner:
                     # longitudinal norm overshoot!
                     dv_b = v - prev_v
                     v_norm_sq = (v * v).sum().clamp_min(1e-6)
-                    proj_coeff = (dv_b * v).sum() / v_norm_sq
+                    proj_coeff = ((dv_b * v).sum() / v_norm_sq).to(dtype=dv_b.dtype)
                     dv_perp = torch.addcmul(dv_b, v, proj_coeff, value=-1.0)
                     if use_symp_verlet and hap_omega > 0.0:
                         # Quantum Symplectic Velocity-Verlet Bi-Orthogonal Integrator (Hairer, Lubich & Wanner 2006)
@@ -2316,7 +2328,7 @@ class OptimizedLatDitRunner:
                         # Project `dv_perp` onto the Lagrangian bi-orthogonal intersection `v^perp \cap x_t^perp`,
                         # preserving both instantaneous kinetic energy ||v||^2 and spherical shell ||x_t||^2!
                         xt_norm_sq = (xt * xt).sum().clamp_min(1e-6)
-                        proj_xt = (dv_perp * xt).sum() / xt_norm_sq
+                        proj_xt = ((dv_perp * xt).sum() / xt_norm_sq).to(dtype=dv_perp.dtype)
                         dv_perp = torch.addcmul(dv_perp, xt, proj_xt, value=-1.0)
                     eff_cd = cd_omega + magnus_gamma * dt
                     if use_symp_verlet and hap_omega > 0.0:
@@ -2329,15 +2341,17 @@ class OptimizedLatDitRunner:
                         cheb_t2 = 2.0 * tau_c * tau_c - 1.0
                         eff_cd = eff_cd * (1.0 + 0.12 * cheb_t2)
                         norm_ratio = (dv_perp * dv_perp).sum() / v_norm_sq
-                        resolvent = 1.0 / (1.0 + pade_eta * norm_ratio)
+                        resolvent = (1.0 / (1.0 + pade_eta * norm_ratio)).to(dtype=v_step.dtype)
                         if use_cayley_lie:
                             # Quantum Cayley-Transform Isometric Lie-Group Step (Cayley 1846 / Hairer, Lubich & Wanner 2006):
                             # Exact SO(N) rotation Cay(Omega) v = ((1 - theta^2/4)*v + eff_cd*dv_perp) / (1 + theta^2/4),
                             # preserving the exact kinetic energy norm ||v||^2 to machine precision!
                             theta_q = 0.25 * (eff_cd * eff_cd) * (resolvent * resolvent) * norm_ratio
-                            cayley_den = 1.0 / (1.0 + theta_q)
+                            cayley_den = (1.0 / (1.0 + theta_q)).to(dtype=v_step.dtype)
                             v_step = v_step * ((1.0 - theta_q) * cayley_den)
-                            v_step = torch.addcmul(v_step, dv_perp, resolvent * cayley_den, value=eff_cd)
+                            v_step = torch.addcmul(
+                                v_step, dv_perp, (resolvent * cayley_den).to(dtype=v_step.dtype), value=eff_cd
+                            )
                         else:
                             v_step = torch.addcmul(v_step, dv_perp, resolvent, value=eff_cd)
                     else:
@@ -2355,7 +2369,9 @@ class OptimizedLatDitRunner:
                     # to cancel the leading O(dt^3) truncation error!
                     d2v_pos = (v_pos - prev_v_pos_step) - (prev_v_pos_step - prev2_v_pos_step)
                     v_norm_r = (v_pos * v_pos).sum().clamp_min(1e-6)
-                    romberg_res = 1.0 / (1.0 + pade_eta * ((d2v_pos * d2v_pos).sum() / v_norm_r))
+                    romberg_res = (1.0 / (1.0 + pade_eta * ((d2v_pos * d2v_pos).sum() / v_norm_r))).to(
+                        dtype=v_step.dtype
+                    )
                     v_step = torch.addcmul(v_step, d2v_pos, romberg_res, value=0.015)
 
                 dt_scale = 1.0
