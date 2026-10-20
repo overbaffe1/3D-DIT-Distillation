@@ -219,8 +219,8 @@ def test_pytorch_pipeline() -> None:
             assert -0.85 <= theta_aa <= 0.85 and 0.0 <= gain_aa <= 1.0
             man_w = compute_manifold_spectral_fdc_weight(0.65, 0.06, 0.09, 0.50, 0.50, 0.25)
             assert 0.85 <= man_w <= 1.12
-            phi1_er, phi2_er = compute_exp_rosenbrock_phi_gains(0.72, 0.44, 0.96, 0.72)
-            assert 0.88 <= phi1_er <= 1.12 and 0.40 <= phi2_er <= 0.60
+            lam_er, phi1_er, phi2_er = compute_exp_rosenbrock_phi_gains(0.72, 0.44, 0.96, 0.72)
+            assert -2.5 <= lam_er <= 0.0 and 0.70 <= phi1_er <= 1.0 and 0.30 <= phi2_er <= 0.50
             assert sol_model.runner.solver_config.uncond_1tok_cond_ffn_stride == 2
             assert sol_model.runner.solver_config.refadapt_cond_cr_stride == 2
             assert sol_model.runner.solver_config.racer_disagreement_shrinkage is True
