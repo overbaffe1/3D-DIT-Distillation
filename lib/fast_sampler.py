@@ -105,6 +105,16 @@ class SolverConfig:
     racer_trust_eta: float = 0.15
     spectral_norm_scaling: bool = True
     spectral_norm_gamma: float = 0.035
+    b7_terminal_token_carving: bool = True
+    pisa_centroid_value_comp: bool = True
+    pisa_centroid_alpha: float = 0.15
+    layercache_noncond_vox_stride: int = 2
+    seacache_wiener_probe: bool = True
+    softcache_headroom_modulation: bool = True
+    softcache_tau: float = 1.35
+    softcache_gamma: float = 0.18
+    anderson_aag_acceleration: bool = True
+    anderson_aag_gamma: float = 0.020
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -363,6 +373,58 @@ def compute_spectral_cache_scale(
     ratio = min(1.35, max(0.70, nc / na))
     g = max(0.0, min(0.25, float(gamma)))
     return float(1.0 + g * (ratio - 1.0))
+
+
+def compute_seacache_softcache_weight(
+    t_val: float,
+    lf_drift: float,
+    hf_drift: float,
+    ref_drift: float,
+    tau: float = 1.35,
+    gamma_soft: float = 0.18,
+) -> float:
+    """
+    SeaCache Spectral-Evolution-Aware (SEA) Wiener Filter (CVPR 2026 Oral, arXiv:2602.18993v2, Eqs. 9-13)
+    + SoftCache Continuous Probe Headroom Modulation (arXiv:2610.22369, Oct 2026, Eqs. 3-6):
+        G_t(f) = a_t * S_x(f) / (a_t^2 * S_x(f) + b_t^2),  a_t = 1 - t, b_t = t
+        H_i = clamp(1 - rho_SEA / tau, 0.15, 1.0)
+    Filters high-frequency diffusion noise from Block-0 probes before computing headroom modulation.
+    """
+    tc = min(0.95, max(0.05, float(t_val)))
+    a_t = 1.0 - tc
+    b_t = tc
+    g_lf = (a_t * 1.0) / (a_t * a_t * 1.0 + b_t * b_t)
+    g_hf = (a_t * 0.25) / (a_t * a_t * 0.25 + b_t * b_t)
+    g_sum = max(1e-8, g_lf + g_hf)
+    w_lf = g_lf / g_sum
+    w_hf = g_hf / g_sum
+    d_sea = w_lf * max(0.0, float(lf_drift)) + w_hf * max(0.0, float(hf_drift))
+    rho = d_sea / max(1e-6, float(ref_drift))
+    tau_safe = max(0.5, float(tau))
+    headroom = min(1.0, max(0.15, 1.0 - (rho / tau_safe)))
+    g_soft = min(0.5, max(0.0, float(gamma_soft)))
+    return float(1.0 - g_soft * (1.0 - headroom))
+
+
+def compute_anderson_aag_gain(
+    dot_g_dg: float,
+    norm_g_sq: float,
+    norm_dg_sq: float,
+) -> Tuple[float, float]:
+    """
+    AAg(1) Modified Anderson Acceleration with Guaranteed Contraction
+    (arXiv:2605.17664, May 2026, Sec. 3, Eqs. 3.6-3.9 & Theorem 3.2):
+        theta_k^* = -<g_k, dg_k> / (||dg_k||_2^2 + eps)
+        gamma_{AA, k} = sqrt(max(0, 1 - <g_k, dg_k>^2 / (||g_k||_2^2 * ||dg_k||_2^2)))
+    Returns (theta_star, contraction_gain = 1 - gamma_{AA, k}).
+    """
+    ng = max(1e-6, float(norm_g_sq))
+    ndg = max(1e-6, float(norm_dg_sq))
+    dot_val = float(dot_g_dg)
+    theta_star = max(-0.85, min(0.85, -dot_val / ndg))
+    cos_sq = min(1.0, max(0.0, (dot_val * dot_val) / (ng * ndg)))
+    gamma_aa = math.sqrt(max(0.0, 1.0 - cos_sq))
+    return float(theta_star), float(1.0 - gamma_aa)
 
 
 

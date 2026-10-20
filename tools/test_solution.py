@@ -190,10 +190,12 @@ def test_pytorch_pipeline() -> None:
             assert getattr(sol_model.runner.flow.blocks[0].qk_norm._q_scale_cast, "_qk_stacked", None) is not None
             assert getattr(sol_model.runner.flow.blocks[0], "_cond_to_q_cross_slice_w", None) is not None
             from lib.fast_sampler import (
+                compute_anderson_aag_gain,
                 compute_arex_affine_defect,
                 compute_cab_nsr_step_ratio,
                 compute_postcache_rts_gain,
                 compute_racer_trust_shrinkage,
+                compute_seacache_softcache_weight,
                 compute_spectral_cache_scale,
                 compute_stork4_rock4_weights,
             )
@@ -209,10 +211,20 @@ def test_pytorch_pipeline() -> None:
             assert 0.15 <= racer_k <= 1.0
             spec_s = compute_spectral_cache_scale(1.12, 1.0, 0.035)
             assert 0.85 <= spec_s <= 1.15
+            sea_w = compute_seacache_softcache_weight(0.65, 0.08, 0.12, 0.10)
+            assert 0.80 <= sea_w <= 1.0
+            theta_aa, gain_aa = compute_anderson_aag_gain(-0.12, 0.25, 0.20)
+            assert -0.85 <= theta_aa <= 0.85 and 0.0 <= gain_aa <= 1.0
             assert sol_model.runner.solver_config.uncond_1tok_cond_ffn_stride == 2
             assert sol_model.runner.solver_config.refadapt_cond_cr_stride == 2
             assert sol_model.runner.solver_config.racer_disagreement_shrinkage is True
             assert sol_model.runner.solver_config.spectral_norm_scaling is True
+            assert sol_model.runner.solver_config.b7_terminal_token_carving is True
+            assert sol_model.runner.solver_config.pisa_centroid_value_comp is True
+            assert sol_model.runner.solver_config.layercache_noncond_vox_stride == 2
+            assert sol_model.runner.solver_config.seacache_wiener_probe is True
+            assert sol_model.runner.solver_config.softcache_headroom_modulation is True
+            assert sol_model.runner.solver_config.anderson_aag_acceleration is True
             # Test under bfloat16 autocast (mirrors `with stage_autocast("lat_dit", device):` in LatDitStage.run)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 g_ac = torch.Generator(device=device).manual_seed(123)

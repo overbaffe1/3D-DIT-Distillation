@@ -3181,5 +3181,15 @@
   "racer_disagreement_shrinkage": true,
   "racer_trust_eta": 0.15,
   "spectral_norm_scaling": true,
-  "spectral_norm_gamma": 0.035
+  "spectral_norm_gamma": 0.035,
+  "b7_terminal_token_carving": true,
+  "pisa_centroid_value_comp": true,
+  "pisa_centroid_alpha": 0.15,
+  "layercache_noncond_vox_stride": 2,
+  "seacache_wiener_probe": true,
+  "softcache_headroom_modulation": true,
+  "softcache_tau": 1.35,
+  "softcache_gamma": 0.18,
+  "anderson_aag_acceleration": true,
+  "anderson_aag_gamma": 0.02
 }
