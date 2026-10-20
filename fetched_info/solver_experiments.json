@@ -4,13 +4,13 @@
     "pos_cosine_sim": 1.000000238418579,
     "neg_1token_max_abs_diff": 2.5033950805664062e-06,
     "neg_1token_cosine_sim": 0.9999999403953552,
-    "ref_pos_sec": 3.423793614999994,
-    "fast_pos_sec": 3.4337884630000133,
-    "ref_neg_sec": 3.514781541000019,
-    "fast_neg_1token_sec": 0.349749796999987,
-    "neg_speedup": 10.04941695791792
+    "ref_pos_sec": 3.330689503000002,
+    "fast_pos_sec": 3.3420630149999795,
+    "ref_neg_sec": 3.362331834999992,
+    "fast_neg_1token_sec": 0.33129873999999404,
+    "neg_speedup": 10.148942416744635
   },
-  "teacher_time_sec": 1.5594213269999955,
+  "teacher_time_sec": 1.4905950889999815,
   "solvers": {
     "euler_20_naive": {
       "steps": 20,
@@ -20,8 +20,8 @@
       "rel_l2": 0.31314706802368164,
       "cosine_sim": 0.9577109813690186,
       "mae": 1.1770495176315308,
-      "time_sec": 0.6939274420000174,
-      "speedup_vs_teacher": 2.247239743834711
+      "time_sec": 0.6442326980000246,
+      "speedup_vs_teacher": 2.313752613966087
     },
     "piecewise_euler_20_exact": {
       "steps": 20,
@@ -31,8 +31,8 @@
       "rel_l2": 0.2805800139904022,
       "cosine_sim": 0.9598773717880249,
       "mae": 1.1455601453781128,
-      "time_sec": 0.6011726350000117,
-      "speedup_vs_teacher": 2.593965919623013
+      "time_sec": 0.5730585489999953,
+      "speedup_vs_teacher": 2.601121807887022
     },
     "piecewise_ab2_20_exact": {
       "steps": 20,
@@ -42,8 +42,8 @@
       "rel_l2": 0.2805800139904022,
       "cosine_sim": 0.9598773717880249,
       "mae": 1.1455601453781128,
-      "time_sec": 0.5935958469999889,
-      "speedup_vs_teacher": 2.6270758713714932
+      "time_sec": 0.5708111440000039,
+      "speedup_vs_teacher": 2.611362978225196
     },
     "piecewise_ab2_16_stride2_reuse": {
       "steps": 16,
@@ -53,8 +53,8 @@
       "rel_l2": 0.2606017291545868,
       "cosine_sim": 0.9662082195281982,
       "mae": 1.126246690750122,
-      "time_sec": 0.5981404119999922,
-      "speedup_vs_teacher": 2.607115813803291
+      "time_sec": 0.5815435680000007,
+      "speedup_vs_teacher": 2.5631701062851056
     },
     "piecewise_ab2_16_stride2_extrap": {
       "steps": 16,
@@ -64,8 +64,8 @@
       "rel_l2": 0.3100644052028656,
       "cosine_sim": 0.9509503245353699,
       "mae": 1.3027430772781372,
-      "time_sec": 0.5313964720000115,
-      "speedup_vs_teacher": 2.9345722246344943
+      "time_sec": 0.49637311200001477,
+      "speedup_vs_teacher": 3.002973071998181
     },
     "piecewise_ab2_14_stride2_extrap": {
       "steps": 14,
@@ -75,8 +75,8 @@
       "rel_l2": 0.4873564839363098,
       "cosine_sim": 0.8784722685813904,
       "mae": 2.093392848968506,
-      "time_sec": 0.5160955469999919,
-      "speedup_vs_teacher": 3.0215748538516647
+      "time_sec": 0.48781643800001007,
+      "speedup_vs_teacher": 3.055647520020534
     },
     "piecewise_ab2_12_stride2_extrap": {
       "steps": 12,
@@ -86,8 +86,8 @@
       "rel_l2": 0.3600243926048279,
       "cosine_sim": 0.9369372725486755,
       "mae": 1.4519773721694946,
-      "time_sec": 0.5084465819999764,
-      "speedup_vs_teacher": 3.0670307997076236
+      "time_sec": 0.4771941580000032,
+      "speedup_vs_teacher": 3.1236658370825476
     }
   }
 }
