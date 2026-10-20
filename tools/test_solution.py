@@ -217,7 +217,7 @@ def test_pytorch_pipeline() -> None:
             assert 0.80 <= sea_w <= 1.0
             theta_aa, gain_aa = compute_anderson_aag_gain(-0.12, 0.25, 0.20)
             assert -0.85 <= theta_aa <= 0.85 and 0.0 <= gain_aa <= 1.0
-            man_w = compute_manifold_spectral_fdc_weight(0.65, 0.06, 0.09, 0.25)
+            man_w = compute_manifold_spectral_fdc_weight(0.65, 0.06, 0.09, 0.50, 0.50, 0.25)
             assert 0.85 <= man_w <= 1.12
             phi1_er, phi2_er = compute_exp_rosenbrock_phi_gains(0.72, 0.44, 0.96, 0.72)
             assert 0.88 <= phi1_er <= 1.12 and 0.40 <= phi2_er <= 0.60
