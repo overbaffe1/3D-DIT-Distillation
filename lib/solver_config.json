@@ -3154,5 +3154,8 @@
   "richardson_romberg_extrapolation": true,
   "fastercache_freq_decoupled_cfg": true,
   "fastercache_hf_boost": 0.035,
-  "cayley_lie_orthogonal_step": true
+  "cayley_lie_orthogonal_step": true,
+  "flow_unipc_bh2_integrator": true,
+  "batched_gate_modulate_stack": true,
+  "fused_cr_carrier_accum": true
 }

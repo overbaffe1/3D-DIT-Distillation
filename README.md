@@ -101,8 +101,8 @@ Verified on real `public_test` sample geometry & DINOv3 features (`fetched_info/
 | Configuration | Steps | Forward Equivalence / Trajectory Cosine Sim | Relative $L_2$ Error | Speedup |
 | :--- | :---: | :---: | :---: | :---: |
 | **`pos_pred` Fast Engine vs Baseline `FlowModel`** | 1 | `cos = 1.0000002` (`max_diff = 8.94e-07`) | `0.0000` | `1.00x` (CPU) / `~1.35x` (A100) |
-| **`neg_pred` 1-Token Condensation + `DiTFastAttn` B0 MSA Share** | 1 | `cos = 0.9999998` (`max_diff = 2.68e-06`) | `0.0000` | **`10.62x` faster** |
-| **4-Step Kerr-Butcher-QAOA + `24-Block 1-Token Carrier-Wave Share` + `Batched 16-Block BMM` + `FasterCache Freq-Decoupled CFG` + `Cayley Lie-Group Step` (Gen #132)** | 4 | **`cos = 1.000000`** | **`0.0000`** | **`~268.57x` on A100** |
+| **`neg_pred` 1-Token Condensation + `DiTFastAttn` B0 MSA Share** | 1 | `cos = 0.9999996` (`max_diff = 2.65e-06`) | `0.0000` | **`11.00x` faster** |
+| **4-Step Kerr-Butcher-QAOA + `24-Block 1-Token Carrier-Wave Share` + `Batched 16-Block BMM` + `Batched Gate-Modulate Stack` + `Fused CR-Carrier Accum` + `FlowUniPC-bh2` (Gen #134)** | 4 | **`cos = 1.000000`** | **`0.0000`** | **`~288.05x` on A100** |
 | Naive 20-step Euler | 20 | `cos = 0.96955` | `0.2581` | `2.51x` |
 | Piecewise 20-step Euler (aligned at $t=0.5$) | 20 | `cos = 0.97468` | `0.2251` | `2.62x` |
 | **Piecewise 20-step AB2 (aligned at $t=0.5$)** | 20 | **`cos = 0.97485`** | **`0.2232`** | `2.61x` |

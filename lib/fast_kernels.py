@@ -552,11 +552,14 @@ if HAS_TRITON:
         B_ptr,
         X_OUT_ptr,
         MOD_OUT_ptr,
+        ACC_ptr,
         M: int,
         H_STRIDE_ROW: int,
         D: tl.constexpr,
         eps: tl.constexpr,
         BLOCK_D: tl.constexpr,
+        HAS_ACC: tl.constexpr = False,
+        INIT_ACC: tl.constexpr = False,
     ):
         row = tl.program_id(0)
         if row >= M:
@@ -568,8 +571,16 @@ if HAS_TRITON:
         x = tl.load(X_ptr + base, mask=mask, other=0.0).to(tl.float32)
         h = tl.load(H_ptr + row * H_STRIDE_ROW + cols, mask=mask, other=0.0).to(tl.float32)
         g = tl.load(G_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        hg = h * g
 
-        x_next = (x + h * g).to(X_OUT_ptr.dtype.element_ty)
+        if HAS_ACC:
+            if INIT_ACC:
+                tl.store(ACC_ptr + base, hg.to(ACC_ptr.dtype.element_ty), mask=mask)
+            else:
+                acc_prev = tl.load(ACC_ptr + base, mask=mask, other=0.0).to(tl.float32)
+                tl.store(ACC_ptr + base, (acc_prev + hg).to(ACC_ptr.dtype.element_ty), mask=mask)
+
+        x_next = (x + hg).to(X_OUT_ptr.dtype.element_ty)
         tl.store(X_OUT_ptr + base, x_next, mask=mask)
 
         xf = x_next.to(tl.float32)
@@ -651,10 +662,13 @@ def fast_gate_add_and_modulate(
     next_shift: torch.Tensor,
     eps: float = 1e-6,
     use_triton: bool = True,
+    acc_inout: Optional[torch.Tensor] = None,
+    init_acc: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Fused `x_next = residual + h * gate_scale` AND `h_mod = LayerNorm(x_next) * (1 + next_scale) + next_shift`
     in a single Triton kernel pass (eliminating a full HBM round-trip of `x_next`).
+    Optionally accumulates `h * gate_scale` into `acc_inout` in registers with zero extra kernel launches!
     """
     if (
         use_triton
@@ -679,6 +693,8 @@ def fast_gate_add_and_modulate(
             b = next_shift.view(-1)
         x_out = torch.empty_like(residual)
         mod_out = torch.empty_like(residual)
+        has_acc = acc_inout is not None
+        acc_ptr = acc_inout if has_acc else x_out
         block_d = triton.next_power_of_2(D)
         _fused_gate_add_ln_modulate_kernel[(M,)](
             residual,
@@ -688,14 +704,25 @@ def fast_gate_add_and_modulate(
             b,
             x_out,
             mod_out,
+            acc_ptr,
             M=M,
             H_STRIDE_ROW=h_stride_row,
             D=D,
             eps=eps,
             BLOCK_D=block_d,
+            HAS_ACC=has_acc,
+            INIT_ACC=init_acc,
             num_warps=8 if block_d >= 2048 else 4,
         )
         return x_out, mod_out
+    if acc_inout is not None:
+        g2 = getattr(gate_scale, "_g_2d", None)
+        if g2 is None or g2.dtype != h.dtype:
+            g2 = gate_scale.view(1, -1).to(dtype=h.dtype)
+        if init_acc:
+            torch.mul(h, g2, out=acc_inout)
+        else:
+            acc_inout.addcmul_(h, g2, value=1.0)
     x_next = fast_gate_add(residual, h, sizes, gate_scale)
     h_mod = fast_modulate(x_next, sizes, next_scale, next_shift, eps=eps)
     return x_next, h_mod
@@ -746,11 +773,14 @@ def fast_gate_add_and_modulate_cond(
             b,
             c_out,
             mod_out,
+            c_out,
             M=M,
             H_STRIDE_ROW=h_stride_row,
             D=D,
             eps=eps,
             BLOCK_D=block_d,
+            HAS_ACC=False,
+            INIT_ACC=False,
             num_warps=8 if block_d >= 2048 else 4,
         )
         return c_out, mod_out
@@ -908,17 +938,22 @@ def apply_rope_cached_3d(
     sin_vox: torch.Tensor,
     coords: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Apply 3D RoPE using precomputed (cos_vox, sin_vox) [N, 1, 3, 16] or 1D table [64, 16] to tokens [N, H, 96]."""
+    """Apply 3D RoPE using precomputed (cos_vox, sin_vox) [N, 1, 3, 16] or 1D table [64, 16] to tokens [N, (2,) H, 96]."""
     if cos_vox.ndim == 2 and coords is not None:
         cos_vox, sin_vox = lookup_rope_3d(coords[:, 1:], cos_vox, sin_vox)
-    N, H, D = tokens.shape
+    orig_shape = tokens.shape
     Q = cos_vox.shape[-1]
-    tok = tokens.float().view(N, H, 3, 2, Q)
+    if tokens.ndim == 4:
+        N, K2, H, D = orig_shape
+        tok = tokens.float().view(N, K2 * H, 3, 2, Q)
+    else:
+        N, H, D = orig_shape
+        tok = tokens.float().view(N, H, 3, 2, Q)
     u = tok[..., 0, :]
     v = tok[..., 1, :]
     out_u = u * cos_vox - v * sin_vox
     out_v = v * cos_vox + u * sin_vox
-    return torch.stack([out_u, out_v], dim=-2).reshape(N, H, D).to(tokens.dtype)
+    return torch.stack([out_u, out_v], dim=-2).reshape(orig_shape).to(tokens.dtype)
 
 
 def apply_rope_cached_2d(
@@ -926,15 +961,20 @@ def apply_rope_cached_2d(
     cos_cond: torch.Tensor,
     sin_cond: torch.Tensor,
 ) -> torch.Tensor:
-    """Apply 2D RoPE using precomputed (cos_cond, sin_cond) [1, L_spatial, 1, 2, 24] to tokens [B, L_spatial, H, 96]."""
-    B, L, H, D = tokens.shape
+    """Apply 2D RoPE using precomputed (cos_cond, sin_cond) [1, L_spatial, 1, 2, 24] to tokens [B, L_spatial, (2,) H, 96]."""
+    orig_shape = tokens.shape
     Q = cos_cond.shape[-1]
-    tok = tokens.float().view(B, L, H, 2, 2, Q)
+    if tokens.ndim == 5:
+        B, L, K2, H, D = orig_shape
+        tok = tokens.float().view(B, L, K2 * H, 2, 2, Q)
+    else:
+        B, L, H, D = orig_shape
+        tok = tokens.float().view(B, L, H, 2, 2, Q)
     u = tok[..., 0, :]
     v = tok[..., 1, :]
     out_u = u * cos_cond - v * sin_cond
     out_v = v * cos_cond + u * sin_cond
-    return torch.stack([out_u, out_v], dim=-2).reshape(B, L, H, D).to(tokens.dtype)
+    return torch.stack([out_u, out_v], dim=-2).reshape(orig_shape).to(tokens.dtype)
 
 
 if HAS_TRITON:
@@ -1287,6 +1327,12 @@ def fused_qknorm_rope2d_cond_inplace(
         )
         return qkv_cond
 
+    if not qkv_cond.is_cuda:
+        qk_scale = torch.stack([q_scale.to(qkv_cond.dtype), k_scale.to(qkv_cond.dtype)], dim=0).unsqueeze(0).unsqueeze(0)
+        qk = fast_rms_norm(qkv_cond[:, :, :2]) * qk_scale
+        qkv_cond[:, :5, :2] = qk[:, :5]
+        qkv_cond[:, 5:, :2] = apply_rope_cached_2d(qk[:, 5:], cos_cond_2d, sin_cond_2d)
+        return qkv_cond
     q_c, k_c, v_c = qkv_cond.unbind(dim=-3)
     q_c = fast_rms_norm(q_c) * q_scale.to(q_c.dtype)
     k_c = fast_rms_norm(k_c) * k_scale.to(k_c.dtype)
@@ -1338,6 +1384,12 @@ def fused_qknorm_rope3d_gather(
         )
         return out_qkv
 
+    if not qkv.is_cuda:
+        qk_scale = torch.stack([q_scale.to(qkv.dtype), k_scale.to(qkv.dtype)], dim=0).unsqueeze(0)
+        qk = apply_rope_cached_3d(fast_rms_norm(qkv[:, :2]) * qk_scale, cos_vox, sin_vox, coords=coords)
+        qkv[:, :2] = qk
+        return qkv[fwd_indices]
+
     q, k, v = qkv.unbind(dim=-3)
     q = fast_rms_norm(q) * q_scale.to(q.dtype)
     k = fast_rms_norm(k) * k_scale.to(k.dtype)
@@ -1366,8 +1418,15 @@ def flash_varlen_qkvpacked_already_sorted(
             )
             return out[bwd_indices]
 
-    # CPU / fallback path using PyTorch SDPA per window chunk
+    # CPU / fallback path using PyTorch SDPA (fast single-window path when cu_seqlens has 1 chunk)
     q_s, k_s, v_s = qkv_sorted.unbind(dim=-3)
+    if cu_seqlens.numel() == 2:
+        out_single = F.scaled_dot_product_attention(
+            q_s.unsqueeze(0).transpose(1, 2),
+            k_s.unsqueeze(0).transpose(1, 2),
+            v_s.unsqueeze(0).transpose(1, 2),
+        ).squeeze(0).transpose(0, 1)
+        return out_single[bwd_indices]
     seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     outs = []
     start = 0
@@ -1448,10 +1507,15 @@ def build_conv_indices_fast(coords: torch.Tensor, already_sorted: bool = False) 
         sorted_keys = keys[order]
 
     out = torch.full((N, 27), -1, dtype=torch.int32, device=coords.device)
+    active_neighbors: List[Tuple[int, torch.Tensor, torch.Tensor]] = []
     d = 0
     for dx in (-1, 0, 1):
         for dy in (-1, 0, 1):
             for dz in (-1, 0, 1):
+                if dx == 0 and dy == 0 and dz == 0:
+                    out[:, d] = torch.arange(N, dtype=torch.int32, device=coords.device)
+                    d += 1
+                    continue
                 xx = x + dx
                 yy = y + dy
                 zz = z + dz
@@ -1460,11 +1524,16 @@ def build_conv_indices_fast(coords: torch.Tensor, already_sorted: bool = False) 
                 idx = torch.searchsorted(sorted_keys, qkeys)
                 idx_clamped = idx.clamp(max=N - 1)
                 found = valid & (idx < N) & (sorted_keys[idx_clamped] == qkeys)
-                if order is None:
-                    out[found, d] = idx_clamped[found].to(torch.int32)
-                else:
-                    out[found, d] = order[idx_clamped[found]].to(torch.int32)
+                dst = torch.where(found)[0]
+                if dst.numel() > 0:
+                    if order is None:
+                        src_long = idx_clamped[dst]
+                    else:
+                        src_long = order[idx_clamped[dst]]
+                    out[dst, d] = src_long.to(torch.int32)
+                    active_neighbors.append((d, dst, src_long))
                 d += 1
+    out._active_neighbors = active_neighbors
     return [out]
 
 
@@ -1483,12 +1552,18 @@ def fast_sparse_conv3d(
         ops_sparse._init(verbose=False)
         return ops_sparse._libsparse.conv_fwd(feat.contiguous(), weight_fp32, bias_fp32, conv_indices)
 
-    # CPU fallback
+    # CPU fallback with pre-indexed active neighbor edges and fused center-voxel (d=13) addcmul
     fwd_indices = conv_indices[0]
     N, C = feat.shape
-    acc = bias_fp32.unsqueeze(0).expand(N, C).clone()
     w_flat = weight_fp32.view(27, C)
     feat_f = feat.float()
+    active_neighbors = getattr(fwd_indices, "_active_neighbors", None)
+    if active_neighbors is not None:
+        acc = torch.addcmul(bias_fp32.unsqueeze(0), feat_f, w_flat[13].unsqueeze(0))
+        for d, dst, src in active_neighbors:
+            acc[dst] += feat_f[src] * w_flat[d]
+        return acc.to(feat.dtype)
+    acc = bias_fp32.unsqueeze(0).expand(N, C).clone()
     for d in range(27):
         idx_d = fwd_indices[:, d]
         mask_d = idx_d >= 0

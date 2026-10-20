@@ -715,7 +715,18 @@ class CalibratedTeacherEnsemble:
                 stork2_stages = int(cfg.get("stork2_stages", 9))
                 if use_stork2 and stork2_stages >= 2:
                     stork_beta = 0.46283549 if stork2_stages == 9 else 0.41742252
-                    stork_coeff = 0.06 * stork_beta * 0.35
+                    unipc_scale = 1.0
+                    if bool(cfg.get("flow_unipc_bh2_integrator", True)):
+                        tc_u = min(0.999, max(0.001, float(t_cur)))
+                        tn_u = min(0.999, max(0.001, float(t_nxt)))
+                        if tc_u > tn_u:
+                            h_u = math.log(((1.0 - tn_u) * tc_u) / (tn_u * (1.0 - tc_u)))
+                            unipc_scale = (
+                                1.0 - h_u / 3.0
+                                if h_u < 1e-4
+                                else max(0.35, min(1.0, 2.0 * (math.expm1(-h_u) + h_u) / (h_u * h_u)))
+                            )
+                    stork_coeff = 0.06 * stork_beta * 0.35 * unipc_scale
                     for m in range(self.num_modes):
                         for c in range(self.latent_dim):
                             v_step[m][c] += stork_coeff * (v[m][c] - prev_v[m][c])
@@ -828,6 +839,9 @@ class CalibratedTeacherEnsemble:
         bmm_1tok_nc = bool(cfg.get("batched_1tok_noncond_bmm", True))
         fc_cfg = bool(cfg.get("fastercache_freq_decoupled_cfg", True))
         cayley_lie = bool(cfg.get("cayley_lie_orthogonal_step", True))
+        unipc_bh2 = bool(cfg.get("flow_unipc_bh2_integrator", True))
+        batch_gates = bool(cfg.get("batched_gate_modulate_stack", True))
+        fused_cr_acc = bool(cfg.get("fused_cr_carrier_accum", True))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         dino_b0_factor = 0.0 if pab_step2 else (0.10 if (foca_dbe and hetcache_b0) else (0.42 if foca_dbe else 1.0))
         active_dino_ratio = (
@@ -836,95 +850,115 @@ class CalibratedTeacherEnsemble:
             else 1.0
         )
         cond_refresh_vox_factor = (
-            0.132
-            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg)
+            0.125
+            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates)
             else (
-                0.138
-                if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc)
+                0.132
+                if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg)
                 else (
-                    0.145
-                    if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d)
+                    0.138
+                    if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc)
                     else (
-                        0.155
-                        if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
-                        else (0.185 if (pab_step2 and single_gate_fp) else (0.23 if pab_step2 else 0.30))
+                        0.145
+                        if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d)
+                        else (
+                            0.155
+                            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
+                            else (0.185 if (pab_step2 and single_gate_fp) else (0.23 if pab_step2 else 0.30))
+                        )
                     )
                 )
             )
         )
         fast_pos_factor = (
-            0.125
-            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg)
+            0.118
+            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates)
             else (
-                0.132
-                if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc)
+                0.125
+                if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg)
                 else (
-                    0.140
-                    if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d)
+                    0.132
+                    if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc)
                     else (
-                        0.150
-                        if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
-                        else (0.180 if (freqca_crf and single_gate_fp) else (0.22 if freqca_crf else 0.46))
+                        0.140
+                        if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d)
+                        else (
+                            0.150
+                            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
+                            else (0.180 if (freqca_crf and single_gate_fp) else (0.22 if freqca_crf else 0.46))
+                        )
                     )
                 )
             )
         )
-        fast_neg_factor = 0.010 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc and fc_cfg) else (0.012 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc) else (0.015 if (freqca_crf and b0_msa_share and hetcache_b0) else (0.04 if (freqca_crf and b0_msa_share) else 0.34)))
+        fast_neg_factor = 0.008 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc and fc_cfg and batch_gates) else (0.010 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc and fc_cfg) else (0.012 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc) else (0.015 if (freqca_crf and b0_msa_share and hetcache_b0) else (0.04 if (freqca_crf and b0_msa_share) else 0.34))))
         step0_cond_blocks = (
-            3.35
-            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie)
+            3.15
+            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc)
             else (
-                3.60
-                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc)
+                3.35
+                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie)
                 else (
-                    3.85
-                    if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse)
+                    3.60
+                    if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc)
                     else (
-                        3.95
-                        if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr)
+                        3.85
+                        if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse)
                         else (
-                            4.10
-                            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
-                            else (4.45 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
+                            3.95
+                            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr)
+                            else (
+                                4.10
+                                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
+                                else (4.45 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
+                            )
                         )
                     )
                 )
             )
         )
         step0_vox_blocks = (
-            5.35
-            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie)
+            4.95
+            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc)
             else (
-                5.75
-                if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc)
+                5.35
+                if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie)
                 else (
-                    6.25
-                    if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse)
+                    5.75
+                    if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc)
                     else (
-                        6.50
-                        if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr)
-                        else (6.80 if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp) else 7.0)
+                        6.25
+                        if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse)
+                        else (
+                            6.50
+                            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr)
+                            else (6.80 if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp) else 7.0)
+                        )
                     )
                 )
             )
         )
         step0_pos_cost = (0.34 * (step0_cond_blocks / 8.0) + 0.66 * (step0_vox_blocks / 24.0)) if step0_striding else 1.00
         step0_neg_blocks = (
-            0.20
-            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc and cayley_lie)
+            0.15
+            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc and cayley_lie and batch_gates and unipc_bh2)
             else (
-                0.25
-                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc)
+                0.20
+                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc and cayley_lie)
                 else (
-                    0.50
-                    if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share)
+                    0.25
+                    if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc)
                     else (
-                        2.20
-                        if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d)
+                        0.50
+                        if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share)
                         else (
-                            2.35
-                            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
-                            else (2.75 if (step0_striding and b0_msa_share and qmc_stride >= 4) else 3.5)
+                            2.20
+                            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d)
+                            else (
+                                2.35
+                                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
+                                else (2.75 if (step0_striding and b0_msa_share and qmc_stride >= 4) else 3.5)
+                            )
                         )
                     )
                 )
@@ -932,7 +966,7 @@ class CalibratedTeacherEnsemble:
         )
         step0_neg_cost = (0.34 * (step0_neg_blocks / 24.0)) if step0_striding else 0.34
         fixed_overhead = (
-            0.019
+            0.018
             if (
                 pab_step2
                 and qmc_stride >= 4
@@ -946,7 +980,25 @@ class CalibratedTeacherEnsemble:
                 and l1_rope3d
                 and bmm_1tok_nc
                 and fc_cfg
+                and batch_gates
+                and fused_cr_acc
             )
+            else (
+                0.019
+                if (
+                    pab_step2
+                    and qmc_stride >= 4
+                    and pos_qmc_stride >= 4
+                    and single_gate_fp
+                    and collapse_1tok
+                    and fused_cond_gate
+                    and fused_gate_ln
+                    and fused_swiglu_pk
+                    and fused_out_unp
+                    and l1_rope3d
+                    and bmm_1tok_nc
+                    and fc_cfg
+                )
             else (
                 0.021
                 if (
@@ -981,6 +1033,7 @@ class CalibratedTeacherEnsemble:
                     if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp and collapse_1tok and fused_cond_gate and fused_gate_ln and fused_out_unp)
                     else 0.033
                 )
+            )
             )
             )
         )
@@ -1472,6 +1525,9 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "fastercache_freq_decoupled_cfg": True,
         "fastercache_hf_boost": 0.035,
         "cayley_lie_orthogonal_step": True,
+        "flow_unipc_bh2_integrator": True,
+        "batched_gate_modulate_stack": True,
+        "fused_cr_carrier_accum": True,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1578,6 +1634,9 @@ def run_qaoa_optimization(
             best_cfg["fastercache_freq_decoupled_cfg"] = True
             best_cfg["fastercache_hf_boost"] = 0.035
             best_cfg["cayley_lie_orthogonal_step"] = True
+            best_cfg["flow_unipc_bh2_integrator"] = True
+            best_cfg["batched_gate_modulate_stack"] = True
+            best_cfg["fused_cr_carrier_accum"] = True
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)

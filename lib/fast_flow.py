@@ -48,6 +48,7 @@ from lib.fast_kernels import (
 from lib.fast_sampler import (
     SolverConfig,
     build_schedule,
+    compute_flow_unipc_bh2_scale,
     compute_stork2_beta,
     get_qaoa_eval_timesteps,
     should_eval_cond,
@@ -280,6 +281,27 @@ class OptimizedLatDitRunner:
             self._noncond_1tok_w_t = None
             self._noncond_1tok_b = None
 
+        if self.flow.clf_shared and all(b.clf_shared for b in self.flow.blocks):
+            self._stacked_block_gates_raw = torch.stack(
+                [b._gates_cast.view(9, D) for b in self.flow.blocks], dim=0
+            ).contiguous()
+            cond_blocks = [b for b in self.flow.blocks if b.cond]
+            noncond_blocks = [b for b in self.flow.blocks if not b.cond]
+            self._stacked_cond_gates_8_raw = (
+                torch.stack([b._cond_gates_cast.view(9, D) for b in cond_blocks], dim=0).contiguous()
+                if cond_blocks
+                else None
+            )
+            self._stacked_cond_gates_16_raw = (
+                torch.stack([b._cond_gates_cast.view(2, D) for b in noncond_blocks], dim=0).contiguous()
+                if noncond_blocks
+                else None
+            )
+        else:
+            self._stacked_block_gates_raw = None
+            self._stacked_cond_gates_8_raw = None
+            self._stacked_cond_gates_16_raw = None
+
         self._zero_clf_token = torch.zeros(1, self.dim, device=device, dtype=target_dtype).contiguous()
 
         if self.solver_config.precompute_rope_tables:
@@ -441,55 +463,139 @@ class OptimizedLatDitRunner:
 
         block_gates = []
         cond_gates = []
-        blocks_to_eval = self.flow.blocks[:1] if block0_only else self.flow.blocks
-        for block in blocks_to_eval:
-            g_param = getattr(block, "_gates_cast", None)
-            if block.clf_shared:
-                gb = (g_param if g_param is not None else block.gates.type_as(clf_shared)) + clf_shared
-            else:
-                gb = block.gates(clf)
-            bg_tuple = gb.chunk(9, dim=-1)
-            if batch_len == 1:
-                s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = bg_tuple
-                for s_t, sh_t, g_t in ((s_msa, sh_msa, g_msa), (s_cr, sh_cr, g_cr), (s_mlp, sh_mlp, g_mlp)):
-                    s_t._w_1ps = (1.0 + s_t.view(-1)).contiguous()
-                    sh_t._b_1d = sh_t.view(-1).contiguous()
-                    g_t._g_2d = g_t.view(1, -1).contiguous()
-            block_gates.append(bg_tuple)
+        D = self.dim
+        use_batched_gates = (
+            batch_len == 1
+            and bool(getattr(self.solver_config, "batched_gate_modulate_stack", True))
+            and getattr(self, "_stacked_block_gates_raw", None) is not None
+        )
+        if use_batched_gates:
             if block0_only:
+                gb0 = self._stacked_block_gates_raw[0] + clf_shared.view(9, D)
+                gb0_w = gb0[(0, 3, 6), :] + 1.0
+                bg_tuple = tuple(gb0[j].unsqueeze(0) for j in range(9))
+                for k, j_base in enumerate((0, 3, 6)):
+                    s_t, sh_t, g_t = bg_tuple[j_base], bg_tuple[j_base + 1], bg_tuple[j_base + 2]
+                    s_t._w_1ps = gb0_w[k]
+                    sh_t._b_1d = gb0[j_base + 1]
+                    g_t._g_2d = g_t
+                block_gates.append(bg_tuple)
                 cond_gates.append(())
-                continue
-            cg_param = getattr(block, "_cond_gates_cast", None)
-            if block.cond:
+                nc_cs_w_fast = None
+                nc_csh_b_fast = None
+                nc_g_cr_fast = None
+            else:
+                gb_all = self._stacked_block_gates_raw + clf_shared.view(1, 9, D)
+                gb_w_all = gb_all[:, (0, 3, 6), :] + 1.0
+                cgb_8 = (
+                    self._stacked_cond_gates_8_raw + clf_shared.view(1, 9, D)
+                    if self._stacked_cond_gates_8_raw is not None
+                    else None
+                )
+                cgb_8_w = cgb_8[:, (0, 3, 6), :] + 1.0 if cgb_8 is not None else None
+                cgb_16 = (
+                    self._stacked_cond_gates_16_raw + clf_shared[:, 3 * D : 5 * D].view(1, 2, D)
+                    if self._stacked_cond_gates_16_raw is not None
+                    else None
+                )
+                cgb_16_w = cgb_16[:, 0, :] + 1.0 if cgb_16 is not None else None
+                c8_idx = 0
+                c16_idx = 0
+                nc_g_cr_list = []
+                for b_i, block in enumerate(self.flow.blocks):
+                    gb_i = gb_all[b_i]
+                    gb_w_i = gb_w_all[b_i]
+                    bg_tuple = tuple(gb_i[j].unsqueeze(0) for j in range(9))
+                    for k, j_base in enumerate((0, 3, 6)):
+                        s_t, sh_t, g_t = bg_tuple[j_base], bg_tuple[j_base + 1], bg_tuple[j_base + 2]
+                        s_t._w_1ps = gb_w_i[k]
+                        sh_t._b_1d = gb_i[j_base + 1]
+                        g_t._g_2d = g_t
+                    block_gates.append(bg_tuple)
+                    if block.cond and cgb_8 is not None and cgb_8_w is not None:
+                        cg_i = cgb_8[c8_idx]
+                        cg_w_i = cgb_8_w[c8_idx]
+                        c8_idx += 1
+                        cg_tuple = tuple(cg_i[j].unsqueeze(0) for j in range(9))
+                        for k, j_base in enumerate((0, 3, 6)):
+                            s_t, sh_t, g_t = cg_tuple[j_base], cg_tuple[j_base + 1], cg_tuple[j_base + 2]
+                            s_t._w_1ps = cg_w_i[k]
+                            sh_t._b_1d = cg_i[j_base + 1]
+                            g_t._g_2d = g_t
+                            g_t._g_3d = g_t.unsqueeze(1)
+                        cond_gates.append(cg_tuple)
+                    elif cgb_16 is not None and cgb_16_w is not None:
+                        cg2_i = cgb_16[c16_idx]
+                        cg2_w_i = cgb_16_w[c16_idx]
+                        c16_idx += 1
+                        cs_cr = cg2_i[0].unsqueeze(0)
+                        csh_cr = cg2_i[1].unsqueeze(0)
+                        cs_cr._w_1ps = cg2_w_i
+                        csh_cr._b_1d = cg2_i[1]
+                        cs_cr._w_3d = cg2_w_i.view(1, 1, -1)
+                        csh_cr._b_3d = cg2_i[1].view(1, 1, -1)
+                        cond_gates.append((cs_cr, csh_cr))
+                        nc_g_cr_list.append(gb_i[5])
+                nc_cs_w_fast = cgb_16_w
+                nc_csh_b_fast = cgb_16[:, 1, :] if cgb_16 is not None else None
+                nc_g_cr_fast = (
+                    gb_all[c8_idx:, 5, :]
+                    if c8_idx + c16_idx == len(self.flow.blocks) and c16_idx > 0
+                    else (torch.stack(nc_g_cr_list, dim=0) if nc_g_cr_list else None)
+                )
+        else:
+            nc_cs_w_fast = None
+            nc_csh_b_fast = None
+            nc_g_cr_fast = None
+            blocks_to_eval = self.flow.blocks[:1] if block0_only else self.flow.blocks
+            for block in blocks_to_eval:
+                g_param = getattr(block, "_gates_cast", None)
                 if block.clf_shared:
-                    cgb = (cg_param if cg_param is not None else block.cond_gates.type_as(clf_shared)) + clf_shared
+                    gb = (g_param if g_param is not None else block.gates.type_as(clf_shared)) + clf_shared
                 else:
-                    cgb = block.cond_gates(clf)
-                cg_tuple = cgb.chunk(9, dim=-1)
+                    gb = block.gates(clf)
+                bg_tuple = gb.chunk(9, dim=-1)
                 if batch_len == 1:
-                    cs_msa, csh_msa, cg_msa, cs_cr, csh_cr, cg_cr, cs_mlp, csh_mlp, cg_mlp = cg_tuple
-                    for s_t, sh_t, g_t in ((cs_msa, csh_msa, cg_msa), (cs_cr, csh_cr, cg_cr), (cs_mlp, csh_mlp, cg_mlp)):
+                    s_msa, sh_msa, g_msa, s_cr, sh_cr, g_cr, s_mlp, sh_mlp, g_mlp = bg_tuple
+                    for s_t, sh_t, g_t in ((s_msa, sh_msa, g_msa), (s_cr, sh_cr, g_cr), (s_mlp, sh_mlp, g_mlp)):
                         s_t._w_1ps = (1.0 + s_t.view(-1)).contiguous()
                         sh_t._b_1d = sh_t.view(-1).contiguous()
                         g_t._g_2d = g_t.view(1, -1).contiguous()
-                        g_t._g_3d = g_t._g_2d.unsqueeze(1)
-                cond_gates.append(cg_tuple)
-            else:
-                if block.clf_shared:
-                    cgb = (
-                        (cg_param if cg_param is not None else block.cond_gates.type_as(clf))
-                        + clf_shared[:, 3 * self.dim : 5 * self.dim]
-                    )
+                block_gates.append(bg_tuple)
+                if block0_only:
+                    cond_gates.append(())
+                    continue
+                cg_param = getattr(block, "_cond_gates_cast", None)
+                if block.cond:
+                    if block.clf_shared:
+                        cgb = (cg_param if cg_param is not None else block.cond_gates.type_as(clf_shared)) + clf_shared
+                    else:
+                        cgb = block.cond_gates(clf)
+                    cg_tuple = cgb.chunk(9, dim=-1)
+                    if batch_len == 1:
+                        cs_msa, csh_msa, cg_msa, cs_cr, csh_cr, cg_cr, cs_mlp, csh_mlp, cg_mlp = cg_tuple
+                        for s_t, sh_t, g_t in ((cs_msa, csh_msa, cg_msa), (cs_cr, csh_cr, cg_cr), (cs_mlp, csh_mlp, cg_mlp)):
+                            s_t._w_1ps = (1.0 + s_t.view(-1)).contiguous()
+                            sh_t._b_1d = sh_t.view(-1).contiguous()
+                            g_t._g_2d = g_t.view(1, -1).contiguous()
+                            g_t._g_3d = g_t._g_2d.unsqueeze(1)
+                    cond_gates.append(cg_tuple)
                 else:
-                    cgb = block.cond_gates(clf)
-                cg_tuple2 = cgb.chunk(2, dim=-1)
-                if batch_len == 1:
-                    cs_cr, csh_cr = cg_tuple2
-                    cs_cr._w_1ps = (1.0 + cs_cr.view(-1)).contiguous()
-                    csh_cr._b_1d = csh_cr.view(-1).contiguous()
-                    cs_cr._w_3d = cs_cr._w_1ps.view(1, 1, -1)
-                    csh_cr._b_3d = csh_cr._b_1d.view(1, 1, -1)
-                cond_gates.append(cg_tuple2)
+                    if block.clf_shared:
+                        cgb = (
+                            (cg_param if cg_param is not None else block.cond_gates.type_as(clf))
+                            + clf_shared[:, 3 * self.dim : 5 * self.dim]
+                        )
+                    else:
+                        cgb = block.cond_gates(clf)
+                    cg_tuple2 = cgb.chunk(2, dim=-1)
+                    if batch_len == 1:
+                        cs_cr, csh_cr = cg_tuple2
+                        cs_cr._w_1ps = (1.0 + cs_cr.view(-1)).contiguous()
+                        csh_cr._b_1d = csh_cr.view(-1).contiguous()
+                        cs_cr._w_3d = cs_cr._w_1ps.view(1, 1, -1)
+                        csh_cr._b_3d = csh_cr._b_1d.view(1, 1, -1)
+                    cond_gates.append(cg_tuple2)
 
         out_scale, out_shift = self.flow.out_gates(clf).chunk(2, dim=-1)
         if batch_len == 1:
@@ -503,13 +609,18 @@ class OptimizedLatDitRunner:
             "out_shift": out_shift,
         }
         if not block0_only and batch_len == 1:
-            nc_cs_w = [cond_gates[i][0]._w_1ps for i, b in enumerate(self.flow.blocks) if not b.cond]
-            nc_csh_b = [cond_gates[i][1]._b_1d for i, b in enumerate(self.flow.blocks) if not b.cond]
-            nc_g_cr = [block_gates[i][5].view(-1) for i, b in enumerate(self.flow.blocks) if not b.cond]
-            if nc_cs_w:
-                result["nc_cs_w"] = torch.stack(nc_cs_w, dim=0).contiguous()
-                result["nc_csh_b"] = torch.stack(nc_csh_b, dim=0).contiguous()
-                result["nc_g_cr"] = torch.stack(nc_g_cr, dim=0).contiguous()
+            if nc_cs_w_fast is not None and nc_csh_b_fast is not None and nc_g_cr_fast is not None:
+                result["nc_cs_w"] = nc_cs_w_fast
+                result["nc_csh_b"] = nc_csh_b_fast
+                result["nc_g_cr"] = nc_g_cr_fast
+            else:
+                nc_cs_w = [cond_gates[i][0]._w_1ps for i, b in enumerate(self.flow.blocks) if not b.cond]
+                nc_csh_b = [cond_gates[i][1]._b_1d for i, b in enumerate(self.flow.blocks) if not b.cond]
+                nc_g_cr = [block_gates[i][5].view(-1) for i, b in enumerate(self.flow.blocks) if not b.cond]
+                if nc_cs_w:
+                    result["nc_cs_w"] = torch.stack(nc_cs_w, dim=0).contiguous()
+                    result["nc_csh_b"] = torch.stack(nc_csh_b, dim=0).contiguous()
+                    result["nc_g_cr"] = torch.stack(nc_g_cr, dim=0).contiguous()
         if can_cache and len(self._time_gates_cache) < 256:
             cache_key = (device, dtype, t_key, bool(block0_only))
             self._time_gates_cache[cache_key] = result
@@ -933,7 +1044,10 @@ class OptimizedLatDitRunner:
             and return_mid_delta
             and (cached_mid_delta is None)
         )
-        pos_cr_sum: Optional[torch.Tensor] = None
+        use_fused_cr_accum = record_pos_carrier and bool(
+            getattr(self.solver_config, "fused_cr_carrier_accum", True)
+        )
+        pos_cr_sum: Optional[torch.Tensor] = torch.empty_like(x) if use_fused_cr_accum else None
         pos_kv_x_list: Optional[List[Tuple[torch.Tensor, torch.Tensor, int]]] = [] if record_pos_carrier else None
 
         for b_idx, block in enumerate(self.flow.blocks):
@@ -1404,7 +1518,7 @@ class OptimizedLatDitRunner:
                     )
                     cr_out_for_x = block.to_out_cross(h_x_out.reshape(N, D))
 
-            if record_pos_carrier:
+            if record_pos_carrier and not use_fused_cr_accum:
                 g_cr_2d = getattr(g_cr, "_g_2d", g_cr.view(1, -1))
                 if pos_cr_sum is None:
                     pos_cr_sum = cr_out_for_x * g_cr_2d
@@ -1441,13 +1555,29 @@ class OptimizedLatDitRunner:
                 else:
                     # Fused Block-0 Cross-Attention Gate-Add + FFN LayerNorm & AdaLN Modulation in 1 Triton kernel!
                     x, h_mlp = fast_gate_add_and_modulate(
-                        x, cr_out_for_x, sizes, g_cr, s_mlp, sh_mlp, use_triton=use_triton
+                        x,
+                        cr_out_for_x,
+                        sizes,
+                        g_cr,
+                        s_mlp,
+                        sh_mlp,
+                        use_triton=use_triton,
+                        acc_inout=pos_cr_sum if use_fused_cr_accum else None,
+                        init_acc=(b_idx == 0),
                     )
                     x_b0_cr = x
             else:
                 # Fused Cross-Attention Gate-Add + FFN LayerNorm & AdaLN Modulation in 1 Triton kernel!
                 x, h_mlp = fast_gate_add_and_modulate(
-                    x, cr_out_for_x, sizes, g_cr, s_mlp, sh_mlp, use_triton=use_triton
+                    x,
+                    cr_out_for_x,
+                    sizes,
+                    g_cr,
+                    s_mlp,
+                    sh_mlp,
+                    use_triton=use_triton,
+                    acc_inout=pos_cr_sum if use_fused_cr_accum else None,
+                    init_acc=(b_idx == 0),
                 )
 
             # --- 3. Main FFN + 3D Submanifold Sparse Conv + Fused Packed SwiGLU ---
@@ -1670,6 +1800,7 @@ class OptimizedLatDitRunner:
         use_fastercache_cfg = bool(getattr(self.solver_config, "fastercache_freq_decoupled_cfg", True))
         fc_hf_boost = float(getattr(self.solver_config, "fastercache_hf_boost", 0.035))
         use_cayley_lie = bool(getattr(self.solver_config, "cayley_lie_orthogonal_step", True))
+        use_flow_unipc = bool(getattr(self.solver_config, "flow_unipc_bh2_integrator", True))
         prev_v_pos_step: Optional[torch.Tensor] = None
         prev2_v_pos_step: Optional[torch.Tensor] = None
         num_blocks = len(self.flow.blocks)
@@ -1920,7 +2051,8 @@ class OptimizedLatDitRunner:
                     # Closed-form S-stage Gegenbauer-Chebyshev recurrence (beta_9 = 0.46283549)
                     # with Padé-bounded step ratio!
                     stork_ratio = min(dt / max(prev_dt, 1e-6), ab2_max_ratio)
-                    stork_coeff = 0.06 * stork2_beta * stork_ratio
+                    unipc_phi2 = compute_flow_unipc_bh2_scale(t_val, t_next) if use_flow_unipc else 1.0
+                    stork_coeff = 0.06 * stork2_beta * stork_ratio * unipc_phi2
                     dv_stork = v - prev_v
                     v_norm_s = (v * v).sum().clamp_min(1e-6)
                     stork_res = 1.0 / (1.0 + pade_eta * ((dv_stork * dv_stork).sum() / v_norm_s))

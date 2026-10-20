@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,6 +78,9 @@ class SolverConfig:
     fastercache_freq_decoupled_cfg: bool = True
     fastercache_hf_boost: float = 0.035
     cayley_lie_orthogonal_step: bool = True
+    flow_unipc_bh2_integrator: bool = True
+    batched_gate_modulate_stack: bool = True
+    fused_cr_carrier_accum: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -188,6 +192,23 @@ def compute_stork2_beta(stages: int = 9) -> float:
         b_cur = mu * b_prev + nu * b_prev2 + mu_t * cf
         b_prev2, b_prev = b_prev, b_cur
     return float(b_prev)
+
+
+def compute_flow_unipc_bh2_scale(t_cur: float, t_next: float) -> float:
+    """
+    Closed-form 2nd-order exponential integrator phi_2(-h) damping factor 2 * (e^{-h} - 1 + h) / h^2
+    in half-log-SNR space lambda(t) = ln((1 - t) / t) (FlowUniPC-bh2, Zhao et al. NeurIPS 2023 / TurboDiffusion 2025).
+    """
+    eps = 1e-3
+    tc = min(1.0 - eps, max(eps, float(t_cur)))
+    tn = min(1.0 - eps, max(eps, float(t_next)))
+    if tc <= tn:
+        return 1.0
+    h = math.log(((1.0 - tn) * tc) / (tn * (1.0 - tc)))
+    if h < 1e-4:
+        return 1.0 - h / 3.0
+    phi2_scale = 2.0 * (math.expm1(-h) + h) / (h * h)
+    return float(max(0.35, min(1.0, phi2_scale)))
 
 
 def build_schedule(
