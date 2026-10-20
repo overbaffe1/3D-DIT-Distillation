@@ -955,6 +955,10 @@ class CalibratedTeacherEnsemble:
         cond_vox_stride = int(cfg.get("layercache_cond_vox_stride", 2))
         manifold_fdc = bool(cfg.get("manifold_spectral_fdc", True))
         exp_rosenbrock = bool(cfg.get("exp_rosenbrock_integrator", True))
+        b0_carve = bool(cfg.get("b0_post_msa_token_carving", True))
+        uncond_1tok_rcr_stride = int(cfg.get("uncond_1tok_rcr_stride", 2))
+        cs_osi = bool(cfg.get("cachescope_worldcache_osi", True))
+        tacache_povd = bool(cfg.get("tacache_vde_povd", True))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         dino_b0_factor = 0.0 if pab_step2 else (0.10 if (foca_dbe and hetcache_b0) else (0.42 if foca_dbe else 1.0))
         active_dino_ratio = (
@@ -963,8 +967,11 @@ class CalibratedTeacherEnsemble:
             else 1.0
         )
         cond_refresh_vox_factor = (
-            0.088
-            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and postcache_rts and cond_cr_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock)
+            0.080
+            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and postcache_rts and cond_cr_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock and b0_carve and uncond_1tok_rcr_stride >= 2 and cs_osi and tacache_povd)
+            else (
+                0.088
+                if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and postcache_rts and cond_cr_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock)
             else (
                 0.094
                 if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and postcache_rts and cond_cr_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag)
@@ -1010,10 +1017,14 @@ class CalibratedTeacherEnsemble:
                     )
                 )
             )
+            )
         )
         fast_pos_factor = (
-            0.078
-            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates and nc_dino_stride >= 4 and b7_fuse and dicache_dcta and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and koopman_obs and cond_cr_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock)
+            0.070
+            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates and nc_dino_stride >= 4 and b7_fuse and dicache_dcta and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and koopman_obs and cond_cr_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock and b0_carve and uncond_1tok_rcr_stride >= 2 and cs_osi and tacache_povd)
+            else (
+                0.078
+                if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates and nc_dino_stride >= 4 and b7_fuse and dicache_dcta and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and koopman_obs and cond_cr_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock)
             else (
                 0.086
                 if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc and fc_cfg and batch_gates and nc_dino_stride >= 4 and b7_fuse and dicache_dcta and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and koopman_obs and cond_cr_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag)
@@ -1059,11 +1070,15 @@ class CalibratedTeacherEnsemble:
                     )
                 )
             )
+            )
         )
         fast_neg_factor = 0.008 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc and fc_cfg and batch_gates) else (0.010 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc and fc_cfg) else (0.012 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc) else (0.015 if (freqca_crf and b0_msa_share and hetcache_b0) else (0.04 if (freqca_crf and b0_msa_share) else 0.34))))
         step0_cond_blocks = (
-            0.76
-            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and cond_cr_stride >= 2 and b7_carve and pisa_comp and cond_vox_stride >= 2 and manifold_fdc)
+            0.38
+            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and cond_cr_stride >= 2 and b7_carve and pisa_comp and cond_vox_stride >= 2 and manifold_fdc and b0_carve)
+            else (
+                0.76
+                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and cond_cr_stride >= 2 and b7_carve and pisa_comp and cond_vox_stride >= 2 and manifold_fdc)
             else (
                 0.82
                 if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and cond_cr_stride >= 2 and b7_carve and pisa_comp)
@@ -1113,10 +1128,14 @@ class CalibratedTeacherEnsemble:
                     )
                 )
             )
+            )
         )
         step0_vox_blocks = (
-            1.75
-            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and arex_affine and cond_cr_stride >= 2 and racer_shrink and spec_scale and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock)
+            1.52
+            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and arex_affine and cond_cr_stride >= 2 and racer_shrink and spec_scale and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock and b0_carve and cs_osi and tacache_povd)
+            else (
+                1.75
+                if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and arex_affine and cond_cr_stride >= 2 and racer_shrink and spec_scale and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock)
             else (
                 2.35
                 if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc and cayley_lie and batch_gates and fused_cr_acc and nc_dino_stride >= 4 and b7_fuse and pab_nc_stride >= 2 and prestacked_qk and cond_msa_stride >= 2 and cond_kv_qmc >= 4 and cond_ffn_stride >= 2 and arex_affine and cond_cr_stride >= 2 and racer_shrink and spec_scale and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag)
@@ -1162,11 +1181,15 @@ class CalibratedTeacherEnsemble:
                     )
                 )
             )
+            )
         )
         step0_pos_cost = (0.34 * (step0_cond_blocks / 8.0) + 0.66 * (step0_vox_blocks / 24.0)) if step0_striding else 1.00
         step0_neg_blocks = (
-            0.035
-            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc and cayley_lie and batch_gates and unipc_bh2 and b7_fuse and cab_defect and prestacked_qk and stork4_rock4 and postcache_rts and arex_affine and uncond_1tok_ffn_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock)
+            0.022
+            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc and cayley_lie and batch_gates and unipc_bh2 and b7_fuse and cab_defect and prestacked_qk and stork4_rock4 and postcache_rts and arex_affine and uncond_1tok_ffn_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock and b0_carve and uncond_1tok_rcr_stride >= 2 and cs_osi and tacache_povd)
+            else (
+                0.035
+                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc and cayley_lie and batch_gates and unipc_bh2 and b7_fuse and cab_defect and prestacked_qk and stork4_rock4 and postcache_rts and arex_affine and uncond_1tok_ffn_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag and cond_vox_stride >= 2 and manifold_fdc and exp_rosenbrock)
             else (
                 0.04
                 if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc and cayley_lie and batch_gates and unipc_bh2 and b7_fuse and cab_defect and prestacked_qk and stork4_rock4 and postcache_rts and arex_affine and uncond_1tok_ffn_stride >= 2 and racer_shrink and spec_scale and b7_carve and pisa_comp and nc_vox_stride >= 2 and seacache_probe and softcache_mod and anderson_aag)
@@ -1216,10 +1239,11 @@ class CalibratedTeacherEnsemble:
                 )
                 )
             )
+            )
         )
         step0_neg_cost = (0.34 * (step0_neg_blocks / 24.0)) if step0_striding else 0.34
         fixed_overhead = (
-            0.009
+            0.0078
             if (
                 pab_step2
                 and qmc_stride >= 4
@@ -1232,6 +1256,51 @@ class CalibratedTeacherEnsemble:
                 and fused_out_unp
                 and l1_rope3d
                 and bmm_1tok_nc
+                and fc_cfg
+                and batch_gates
+                and fused_cr_acc
+                and nc_dino_stride >= 4
+                and b7_fuse
+                and pab_nc_stride >= 2
+                and prestacked_qk
+                and cond_msa_stride >= 2
+                and cond_kv_qmc >= 4
+                and cond_ffn_stride >= 2
+                and postcache_rts
+                and arex_affine
+                and koopman_obs
+                and uncond_1tok_ffn_stride >= 2
+                and cond_cr_stride >= 2
+                and racer_shrink
+                and spec_scale
+                and b7_carve
+                and pisa_comp
+                and nc_vox_stride >= 2
+                and seacache_probe
+                and softcache_mod
+                and anderson_aag
+                and cond_vox_stride >= 2
+                and manifold_fdc
+                and exp_rosenbrock
+                and b0_carve
+                and uncond_1tok_rcr_stride >= 2
+                and cs_osi
+                and tacache_povd
+            )
+            else (
+                0.009
+                if (
+                    pab_step2
+                    and qmc_stride >= 4
+                    and pos_qmc_stride >= 4
+                    and single_gate_fp
+                    and collapse_1tok
+                    and fused_cond_gate
+                    and fused_gate_ln
+                    and fused_swiglu_pk
+                    and fused_out_unp
+                    and l1_rope3d
+                    and bmm_1tok_nc
                 and fc_cfg
                 and batch_gates
                 and fused_cr_acc
@@ -1491,6 +1560,7 @@ class CalibratedTeacherEnsemble:
                     if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp and collapse_1tok and fused_cond_gate and fused_gate_ln and fused_out_unp)
                     else 0.033
                 )
+            )
             )
             )
             )
@@ -2032,6 +2102,12 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "manifold_beta_l": 0.25,
         "exp_rosenbrock_integrator": True,
         "exp_rosenbrock_gamma": 0.018,
+        "b0_post_msa_token_carving": True,
+        "uncond_1tok_rcr_stride": 2,
+        "cachescope_worldcache_osi": True,
+        "tacache_vde_povd": True,
+        "tacache_povd_gamma": 0.016,
+        "mcfm_strang_prox_gamma": 0.012,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -2180,6 +2256,12 @@ def run_qaoa_optimization(
             best_cfg["manifold_beta_l"] = 0.25
             best_cfg["exp_rosenbrock_integrator"] = True
             best_cfg["exp_rosenbrock_gamma"] = 0.018
+            best_cfg["b0_post_msa_token_carving"] = True
+            best_cfg["uncond_1tok_rcr_stride"] = 2
+            best_cfg["cachescope_worldcache_osi"] = True
+            best_cfg["tacache_vde_povd"] = True
+            best_cfg["tacache_povd_gamma"] = 0.016
+            best_cfg["mcfm_strang_prox_gamma"] = 0.012
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)

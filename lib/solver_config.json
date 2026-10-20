@@ -3196,5 +3196,11 @@
   "manifold_spectral_fdc": true,
   "manifold_beta_l": 0.25,
   "exp_rosenbrock_integrator": true,
-  "exp_rosenbrock_gamma": 0.018
+  "exp_rosenbrock_gamma": 0.018,
+  "b0_post_msa_token_carving": true,
+  "uncond_1tok_rcr_stride": 2,
+  "cachescope_worldcache_osi": true,
+  "tacache_vde_povd": true,
+  "tacache_povd_gamma": 0.016,
+  "mcfm_strang_prox_gamma": 0.012
 }

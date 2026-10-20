@@ -193,6 +193,7 @@ def test_pytorch_pipeline() -> None:
                 compute_anderson_aag_gain,
                 compute_arex_affine_defect,
                 compute_cab_nsr_step_ratio,
+                compute_cachescope_worldcache_osi_weight,
                 compute_exp_rosenbrock_phi_gains,
                 compute_manifold_spectral_fdc_weight,
                 compute_postcache_rts_gain,
@@ -200,6 +201,7 @@ def test_pytorch_pipeline() -> None:
                 compute_seacache_softcache_weight,
                 compute_spectral_cache_scale,
                 compute_stork4_rock4_weights,
+                compute_tacache_vde_mcfm_gains,
             )
             r_cab = compute_cab_nsr_step_ratio(0.95, 0.72, 0.44)
             assert 0.20 <= r_cab <= 1.5
@@ -221,6 +223,12 @@ def test_pytorch_pipeline() -> None:
             assert 0.85 <= man_w <= 1.12
             lam_er, phi1_er, phi2_er = compute_exp_rosenbrock_phi_gains(0.72, 0.44, 0.96, 0.72)
             assert -2.5 <= lam_er <= 0.0 and 0.70 <= phi1_er <= 1.0 and 0.30 <= phi2_er <= 0.50
+            cs_osi_w = compute_cachescope_worldcache_osi_weight(0.08, 0.07, 0.0055, 0.0050, 1.05)
+            assert 0.82 <= cs_osi_w <= 1.15
+            g_par_ta, d_perp_ta, shrink_mcfm = compute_tacache_vde_mcfm_gains(
+                0.72, 0.44, 0.15, 2.50, 0.30, 0.80, 4.00, 0.012
+            )
+            assert 0.85 <= g_par_ta <= 1.15 and 0.0 <= d_perp_ta <= 0.35 and 0.92 <= shrink_mcfm <= 1.0
             assert sol_model.runner.solver_config.uncond_1tok_cond_ffn_stride == 2
             assert sol_model.runner.solver_config.refadapt_cond_cr_stride == 2
             assert sol_model.runner.solver_config.racer_disagreement_shrinkage is True
@@ -234,6 +242,10 @@ def test_pytorch_pipeline() -> None:
             assert sol_model.runner.solver_config.layercache_cond_vox_stride == 2
             assert sol_model.runner.solver_config.manifold_spectral_fdc is True
             assert sol_model.runner.solver_config.exp_rosenbrock_integrator is True
+            assert sol_model.runner.solver_config.b0_post_msa_token_carving is True
+            assert sol_model.runner.solver_config.uncond_1tok_rcr_stride == 2
+            assert sol_model.runner.solver_config.cachescope_worldcache_osi is True
+            assert sol_model.runner.solver_config.tacache_vde_povd is True
             # Test under bfloat16 autocast (mirrors `with stage_autocast("lat_dit", device):` in LatDitStage.run)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 g_ac = torch.Generator(device=device).manual_seed(123)

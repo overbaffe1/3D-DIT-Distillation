@@ -52,6 +52,7 @@ from lib.fast_sampler import (
     compute_anderson_aag_gain,
     compute_arex_affine_defect,
     compute_cab_nsr_step_ratio,
+    compute_cachescope_worldcache_osi_weight,
     compute_exp_rosenbrock_phi_gains,
     compute_flow_unipc_bh2_scale,
     compute_manifold_spectral_fdc_weight,
@@ -60,7 +61,8 @@ from lib.fast_sampler import (
     compute_seacache_softcache_weight,
     compute_spectral_cache_scale,
     compute_stork2_beta,
-     compute_stork4_rock4_weights,
+    compute_stork4_rock4_weights,
+    compute_tacache_vde_mcfm_gains,
     get_qaoa_eval_timesteps,
     should_eval_cond,
     should_eval_uncond,
@@ -869,6 +871,9 @@ class OptimizedLatDitRunner:
         cond_vox_stride = int(getattr(self.solver_config, "layercache_cond_vox_stride", 2))
         use_manifold_fdc = bool(getattr(self.solver_config, "manifold_spectral_fdc", True))
         manifold_beta_l = float(getattr(self.solver_config, "manifold_beta_l", 0.25))
+        use_b0_carve = bool(getattr(self.solver_config, "b0_post_msa_token_carving", True))
+        uncond_1tok_rcr_stride = int(getattr(self.solver_config, "uncond_1tok_rcr_stride", 2))
+        use_cs_osi = bool(getattr(self.solver_config, "cachescope_worldcache_osi", True))
         dmd_lambda = float(getattr(self.solver_config, "dmd_exp_decay_lambda", 0.015))
         use_1tok_collapse = bool(getattr(self.solver_config, "fused_1tok_linear_collapse", True))
         eff_mid_scale = (
@@ -979,6 +984,7 @@ class OptimizedLatDitRunner:
                 and "nc_cs_w" in tg
             )
             use_1tok_ffn_stride = uncond_1tok_ffn_stride > 1
+            use_1tok_rcr_stride = uncond_1tok_rcr_stride > 1
             prev_1tok_msa_out: Optional[torch.Tensor] = None
             prev_1tok_hx_cross: Optional[torch.Tensor] = None
             prev_1tok_rcr_proj: Optional[torch.Tensor] = None
@@ -997,6 +1003,15 @@ class OptimizedLatDitRunner:
                         and (b_idx % uncond_1tok_ffn_stride != 0)
                         and (prev_1tok_msa_out is not None)
                         and (prev_1tok_hx_cross is not None)
+                        and (prev_1tok_rcr_proj is not None)
+                        and (prev_1tok_ffn_out is not None)
+                    )
+                    will_reuse_1tok_rcr = (
+                        use_1tok_rcr_stride
+                        and (not will_reuse_1tok_ffn)
+                        and (b_idx > 0)
+                        and (b_idx < self.cond_depth - 1)
+                        and ((b_idx // max(1, uncond_1tok_ffn_stride)) % uncond_1tok_rcr_stride != 0)
                         and (prev_1tok_rcr_proj is not None)
                         and (prev_1tok_ffn_out is not None)
                     )
@@ -1019,9 +1034,13 @@ class OptimizedLatDitRunner:
                         cond_ffn_out = prev_1tok_ffn_out
                     else:
                         h_cond = (
-                            h_cond_msa_pre
-                            if h_cond_msa_pre is not None
-                            else fast_modulate_cond(cond, cs_msa, csh_msa)
+                            csh_msa.view(1, 1, D)
+                            if b_idx == 0
+                            else (
+                                h_cond_msa_pre
+                                if h_cond_msa_pre is not None
+                                else fast_modulate_cond(cond, cs_msa, csh_msa)
+                            )
                         )
                         h_cond_msa_pre = None
                         m1_w = getattr(block, "_cond_1tok_msa_w", None) if use_1tok_collapse else None
@@ -1039,41 +1058,63 @@ class OptimizedLatDitRunner:
                         cond, h_cond_cr = fast_gate_add_and_modulate_cond(
                             cond, cond_msa_out, cg_msa, cs_cr, csh_cr, use_triton=use_triton
                         )
-                        qo_w = getattr(block, "_cond_1tok_q_and_out_cr_w", None) if use_1tok_collapse else None
-                        if qo_w is not None:
-                            q_cc_flat, h_x_cross = (
-                                F.linear(
-                                    h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
+                        if will_reuse_1tok_rcr and prev_1tok_rcr_proj is not None and prev_1tok_ffn_out is not None:
+                            # PISA (arXiv:2602.01077) + ToMA (arXiv:2509.10918) Even-Block 1-Token Reverse-CR & FFN Reuse:
+                            # In intermediate even blocks (2, 6), compute exact current-block `cond_msa_out` and
+                            # forward 1-token `h_x_cross = F.linear(h_cond_cr, _cond_1tok_cr_w)` for 3D voxels,
+                            # while reusing `prev_1tok_rcr_proj` and `prev_1tok_ffn_out` with exact current gates!
+                            c1_w = getattr(block, "_cond_1tok_cr_w", None) if use_1tok_collapse else None
+                            if c1_w is not None:
+                                h_x_cross = F.linear(
+                                    h_cond_cr.view(1, D), c1_w, getattr(block, "_cond_1tok_cr_b", None)
                                 )
-                                .view(2, 1, D)
-                                .unbind(0)
-                            )
-                            q_cc = q_cc_flat.view(1, H, HD)
+                            else:
+                                v_w = getattr(block, "_cond_to_v_cross_w", None)
+                                if v_w is not None:
+                                    v_cc = F.linear(h_cond_cr, v_w, getattr(block, "_cond_to_v_cross_b", None)).view(1, D)
+                                else:
+                                    v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, D)[:, 2]
+                                h_x_cross = block.to_out_cross(v_cc)
+                            if use_1tok_ffn_stride:
+                                prev_1tok_hx_cross = h_x_cross
+                            cond = fast_gate_add_cond(cond, prev_1tok_rcr_proj, cg_cr)
+                            cond_ffn_out = prev_1tok_ffn_out
                         else:
-                            q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
-                            h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
-                        if use_1tok_ffn_stride:
-                            prev_1tok_hx_cross = h_x_cross
-                        kv_x, q_seq_use, q_max_use = self._last_pos_kv_x_list[b_idx]
-                        h_c_cross = flash_cross_attn(
-                            q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seq_use, q_max_use
-                        )
-                        cond_rcr_proj = block.cond_to_out_cross(h_c_cross.view(1, 1, D))
-                        if use_1tok_ffn_stride:
-                            prev_1tok_rcr_proj = cond_rcr_proj
-                        cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
-                            cond,
-                            cond_rcr_proj,
-                            cg_cr,
-                            cs_mlp,
-                            csh_mlp,
-                            use_triton=use_triton,
-                        )
-                        cond_ffn_out = block.cond_ffn1(
-                            fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)
-                        )
-                        if use_1tok_ffn_stride:
-                            prev_1tok_ffn_out = cond_ffn_out
+                            qo_w = getattr(block, "_cond_1tok_q_and_out_cr_w", None) if use_1tok_collapse else None
+                            if qo_w is not None:
+                                q_cc_flat, h_x_cross = (
+                                    F.linear(
+                                        h_cond_cr.view(1, D), qo_w, getattr(block, "_cond_1tok_q_and_out_cr_b", None)
+                                    )
+                                    .view(2, 1, D)
+                                    .unbind(0)
+                                )
+                                q_cc = q_cc_flat.view(1, H, HD)
+                            else:
+                                q_cc, _, v_cc = block.cond_to_qkv_cross(h_cond_cr).view(1, 3, H, HD).unbind(dim=-3)
+                                h_x_cross = block.to_out_cross(v_cc.reshape(1, D))
+                            if use_1tok_ffn_stride:
+                                prev_1tok_hx_cross = h_x_cross
+                            kv_x, q_seq_use, q_max_use = self._last_pos_kv_x_list[b_idx]
+                            h_c_cross = flash_cross_attn(
+                                q_cc, kv_seqlens_1tok, kv_maxlen_1tok, kv_x, q_seq_use, q_max_use
+                            )
+                            cond_rcr_proj = block.cond_to_out_cross(h_c_cross.view(1, 1, D))
+                            if use_1tok_ffn_stride or use_1tok_rcr_stride:
+                                prev_1tok_rcr_proj = cond_rcr_proj
+                            cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
+                                cond,
+                                cond_rcr_proj,
+                                cg_cr,
+                                cs_mlp,
+                                csh_mlp,
+                                use_triton=use_triton,
+                            )
+                            cond_ffn_out = block.cond_ffn1(
+                                fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)
+                            )
+                            if use_1tok_ffn_stride or use_1tok_rcr_stride:
+                                prev_1tok_ffn_out = cond_ffn_out
                     next_reuses_1tok = (
                         use_1tok_ffn_stride
                         and (b_idx + 1 > 0)
@@ -1469,9 +1510,16 @@ class OptimizedLatDitRunner:
                             (use_spec_scale and spec_gamma > 0.0)
                             or (bary_beta > 0.0 and use_dicache_dcta and has_fn_step0)
                         ):
-                            # Single-Sync Batched L1 Probe Reduction (eliminates 5-7 separate .item() GPU syncs
+                            # Single-Sync Batched L1/L2 Probe Reduction (eliminates 5-9 separate .item() GPU syncs
                             # and avoids allocating a 46MB [N, D] temporary tensor via zero-copy FDC channel slices!):
                             d_half = D // 2
+                            has_x_patch_prev = (
+                                getattr(self, "_last_b0_x_patchify", None) is not None
+                                and self._last_b0_x_patchify.shape == (N, D)
+                            )
+                            dx_cur_fn: Optional[torch.Tensor] = (
+                                (x_patchify - self._last_b0_x_patchify) if has_x_patch_prev else diff_cur_fn
+                            )
                             if has_fn_step0 and diff_cur_fn is not None and y_prev_fn is not None:
                                 stats_list = torch.stack(
                                     [
@@ -1483,11 +1531,24 @@ class OptimizedLatDitRunner:
                                         diff_cur_fn[:, d_half:].abs().mean(),
                                         y_prev_fn[:, :d_half].abs().mean(),
                                         y_prev_fn[:, d_half:].abs().mean(),
+                                        dx_cur_fn.abs().mean() if dx_cur_fn is not None else diff_cur_fn.abs().mean(),
+                                        (diff_cur_fn * y_prev_fn).mean(),
+                                        (y_prev_fn * y_prev_fn).mean(),
                                     ]
                                 ).tolist()
-                                norm_cur_l1, norm_anc_l1, num_l1, den_l1, lf_cur, hf_cur, lf_anc, hf_anc = (
-                                    float(v_s) for v_s in stats_list
-                                )
+                                (
+                                    norm_cur_l1,
+                                    norm_anc_l1,
+                                    num_l1,
+                                    den_l1,
+                                    lf_cur,
+                                    hf_cur,
+                                    lf_anc,
+                                    hf_anc,
+                                    dx_l1,
+                                    dot_dy,
+                                    norm_dy_prev_sq,
+                                ) = (float(v_s) for v_s in stats_list)
                             else:
                                 stats_list = torch.stack(
                                     [
@@ -1497,13 +1558,13 @@ class OptimizedLatDitRunner:
                                 ).tolist()
                                 norm_cur_l1 = float(stats_list[0])
                                 norm_anc_l1 = float(stats_list[1])
-                                num_l1 = den_l1 = lf_cur = hf_cur = lf_anc = hf_anc = 0.0
+                                num_l1 = den_l1 = lf_cur = hf_cur = lf_anc = hf_anc = dx_l1 = dot_dy = norm_dy_prev_sq = 0.0
                             if use_spec_scale and spec_gamma > 0.0:
                                 eff_mid_step_scale = eff_mid_step_scale * compute_spectral_cache_scale(
                                     norm_cur_l1, norm_anc_l1, gamma=spec_gamma
                                 )
                         else:
-                            num_l1 = den_l1 = lf_cur = hf_cur = lf_anc = hf_anc = 0.0
+                            num_l1 = den_l1 = lf_cur = hf_cur = lf_anc = hf_anc = dx_l1 = dot_dy = norm_dy_prev_sq = 0.0
                         if (
                             bary_beta > 0.0
                             and crf_s0 is not None
@@ -1535,6 +1596,14 @@ class OptimizedLatDitRunner:
                                         hf_anc,
                                         beta_l=manifold_beta_l,
                                     )
+                                if use_cs_osi:
+                                    eff_beta = eff_beta * compute_cachescope_worldcache_osi_weight(
+                                        num_l1,
+                                        dx_l1,
+                                        dot_dy,
+                                        norm_dy_prev_sq,
+                                        rfc_io_ratio=num_l1 / max(1e-6, dx_l1),
+                                    )
                             x = torch.add(x, crf_base, alpha=eff_mid_step_scale * (1.0 + eff_beta))
                             x = torch.add(x, crf_s0, alpha=-eff_mid_step_scale * eff_beta)
                         else:
@@ -1551,6 +1620,7 @@ class OptimizedLatDitRunner:
                         break
                     else:
                         x_b0_msa = x
+                        self._last_b0_x_patchify = x_patchify
                         if use_subblock_crf:
                             self._last_b0_fn_res = x - x_patchify
                             if cached_mid_delta is None:
@@ -1809,12 +1879,14 @@ class OptimizedLatDitRunner:
                             cond_msa_proj = block.cond_to_out(h_cond.reshape(batch_size, L, D))
                             if b_idx == 0 and not uncond:
                                 self._last_b0_cond_msa_out = cond_msa_proj
-                            if use_cond_msa_stride:
-                                prev_cond_msa_proj = cond_msa_proj
-                            b7_carved = False
+                            if not locals().get("b7_carved", False):
+                                b7_carved = False
                             if (
-                                use_b7_carve
-                                and (b_idx == self.cond_depth - 1)
+                                (not b7_carved)
+                                and (
+                                    (use_b0_carve and b_idx == 0 and cached_cond_block7 is None)
+                                    or (use_b7_carve and b_idx == self.cond_depth - 1)
+                                )
                                 and (not uncond)
                                 and (nc_dino_stride > 1)
                                 and (cond_kv_qmc_stride == nc_dino_stride)
@@ -1824,12 +1896,11 @@ class OptimizedLatDitRunner:
                                 and batch_size == 1
                                 and L > 16
                             ):
-                                # Fast-SAM3D / Fast-TRELLIS (arXiv:2602.05293, ICML 2026) + FoCa Exact Block-7 Terminal Token Carving
-                                # + PISA (arXiv:2602.01077, ICML 2026) Zeroth-Order Centroid Value Compensation:
-                                # After Block-7 2D DINO self-attention, only the 5 global tokens and every `nc_dino_stride`-th
-                                # patch token are ever read by Block-7 `x -> cond` or Blocks 8..23 `ln_cond_after_7`.
-                                # Carving `cond` and `cond_msa_proj` here cuts 75% of Block-7 cross-QKV, reverse FlashAttention,
-                                # and 4101-token DINO FFN FLOPs!
+                                # ToPi (arXiv:2602.01609) + CoReDiT (arXiv:2605.14191) + Fast-SAM3D (arXiv:2602.05293, ICML 2026)
+                                # + PISA (arXiv:2602.01077, ICML 2026) Position-Preserving Post-Block-0 2D QMC DINO Token Carving:
+                                # Immediately after Block-0's full 4101x4101 2D DINO self-attention aggregates global context,
+                                # carve `cond` and `cond_msa_proj` to the 5 global tokens + every `nc_dino_stride`-th patch
+                                # with zeroth-order PISA centroid value compensation and position-preserving 2D RoPE slicing!
                                 c_patches_all = cond[:, 5:]
                                 c_patches_sub = c_patches_all[:, ::nc_dino_stride]
                                 m_patches_all = cond_msa_proj[:, 5:]
@@ -1844,7 +1915,19 @@ class OptimizedLatDitRunner:
                                 cond = torch.cat([cond[:, :5], c_patches_sub], dim=1).contiguous()
                                 cond_msa_proj = torch.cat([cond_msa_proj[:, :5], m_patches_sub], dim=1).contiguous()
                                 L = cond.shape[1]
+                                if b_idx == 0:
+                                    rope2d_sub_key = f"rope2d_sub_{nc_dino_stride}_{L - 5}"
+                                    rope2d_sub = geom.get(rope2d_sub_key)
+                                    if rope2d_sub is None:
+                                        rope2d_sub = (
+                                            cos_cond_2d[:, ::nc_dino_stride].contiguous(),
+                                            sin_cond_2d[:, ::nc_dino_stride].contiguous(),
+                                        )
+                                        geom[rope2d_sub_key] = rope2d_sub
+                                    cos_cond_2d, sin_cond_2d = rope2d_sub
                                 b7_carved = True
+                            if use_cond_msa_stride:
+                                prev_cond_msa_proj = cond_msa_proj
                             cond, h_cond_cr = fast_gate_add_and_modulate_cond(
                                 cond, cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
                             )
@@ -1852,7 +1935,7 @@ class OptimizedLatDitRunner:
                         if not locals().get("b7_carved", False):
                             b7_carved = False
                         h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
-                        if b7_carved:
+                        if L != kv_maxlen_full:
                             c_key = f"kv_seqlens_nc_{L}"
                             kv_seq_cond_cr = geom.get(c_key)
                             if kv_seq_cond_cr is None:
@@ -2181,7 +2264,7 @@ class OptimizedLatDitRunner:
                     kv_cc = block.cond_to_kv_cross(h_cond_cr.view(batch_size * L_nc, D)).view(batch_size * L_nc, 2, H, HD)
                     if need_full_kv_cc and kv_cc_cache_out is not None:
                         kv_cc_cache_out.append(kv_cc)
-                    if L_nc == cond.shape[1]:
+                    if L_nc == kv_maxlen_full:
                         kv_seq_nc, kv_max_nc = kv_seqlens_full, kv_maxlen_full
                     else:
                         nc_key = f"kv_seqlens_nc_{L_nc}"
@@ -2477,6 +2560,7 @@ class OptimizedLatDitRunner:
             rk_corr = xt @ b_init_t
 
         self._last_b0_x_after_msa = None
+        self._last_b0_x_patchify = None
         self._last_b0_cr_proj = None
         self._last_b0_cond_msa_out = None
         self._last_pos_crf_after_b0_msa = None
@@ -2518,6 +2602,9 @@ class OptimizedLatDitRunner:
         anderson_gamma = float(getattr(self.solver_config, "anderson_aag_gamma", 0.020))
         use_exp_rosenbrock = bool(getattr(self.solver_config, "exp_rosenbrock_integrator", True))
         exp_rosenbrock_gamma = float(getattr(self.solver_config, "exp_rosenbrock_gamma", 0.018))
+        use_tacache_povd = bool(getattr(self.solver_config, "tacache_vde_povd", True))
+        tacache_gamma = float(getattr(self.solver_config, "tacache_povd_gamma", 0.016))
+        mcfm_gamma = float(getattr(self.solver_config, "mcfm_strang_prox_gamma", 0.012))
         prev_v_pos_step: Optional[torch.Tensor] = None
         prev2_v_pos_step: Optional[torch.Tensor] = None
         prev_xt_step: Optional[torch.Tensor] = None
@@ -2946,19 +3033,35 @@ class OptimizedLatDitRunner:
                     # Exponential Rosenbrock-Euler / ExpRK Stiff Integrator (Hochbruck, Ostermann & Schweitzer /
                     # Ando, Cangiotti & Sensi, arXiv:2507.04024, Feb 2026, Eqs. 3-4)
                     # + DaTMe Tweedie Clean-Manifold Residual (arXiv:2610.22370, Oct 2026, Eqs. 4-6)
-                    # + LayerCache / MeanFlow JVP Velocity Correction (arXiv:2604.16492, Apr 2026, Eqs. 3-7):
-                    # Project score update into scale-invariant clean Tweedie space dx0_hat = x0_hat(t_n) - x0_hat(t_{n-1})
-                    # and weight by A-stable exponential propagators phi_1(h_n * lambda_n), phi_2(h_n * lambda_n)!
-                    x0_hat_cur = xt.to(dtype=v_step.dtype) - (t_val * v).to(dtype=v_step.dtype)
+                    # + TACache Parallel-Orthogonal Velocity Decomposition (POVD / TASU, arXiv:2605.16789, May 2026)
+                    # + VDE Input-Adaptive Velocity Decomposition (arXiv:2605.23381v1, May 2026)
+                    # + MCFM Strang-Prox Metriplectic Conservative-Dissipative Shrinkage (arXiv:2509.19526v2, Theorem 2):
+                    xt_f = xt.to(dtype=v_step.dtype)
+                    x0_hat_cur = xt_f - (t_val * v).to(dtype=v_step.dtype)
                     dx0_hat = x0_hat_cur - prev_x0_hat_step
-                    dxt_cur = xt.to(dtype=v_step.dtype) - prev_xt_step
-                    er_norms = torch.stack(
-                        [
-                            (dx0_hat * dx0_hat).sum(),
-                            (dxt_cur * dxt_cur).sum(),
-                            (v * v).sum(),
-                        ]
-                    ).tolist()
+                    dxt_cur = xt_f - prev_xt_step
+                    has_ta = use_tacache_povd and tacache_gamma > 0.0 and prev_v is not None and prev_dt is not None
+                    if has_ta:
+                        a_ta = (v - prev_v) * (1.0 / max(prev_dt, 1e-6))
+                        er_norms = torch.stack(
+                            [
+                                (dx0_hat * dx0_hat).sum(),
+                                (dxt_cur * dxt_cur).sum(),
+                                (v * v).sum(),
+                                (a_ta * v).sum(),
+                                (a_ta * a_ta).sum(),
+                                (v * xt_f).sum(),
+                                (xt_f * xt_f).sum(),
+                            ]
+                        ).tolist()
+                    else:
+                        er_norms = torch.stack(
+                            [
+                                (dx0_hat * dx0_hat).sum(),
+                                (dxt_cur * dxt_cur).sum(),
+                                (v * v).sum(),
+                            ]
+                        ).tolist()
                     n_dx0_sq = max(0.0, float(er_norms[0]))
                     n_dxt_sq = max(1e-12, float(er_norms[1]))
                     n_v_sq = max(1e-6, float(er_norms[2]))
@@ -2971,6 +3074,27 @@ class OptimizedLatDitRunner:
                     er_res = 1.0 / (1.0 + pade_eta * (n_dx0_sq / n_v_sq))
                     er_coeff = exp_rosenbrock_gamma * phi1_er * (1.0 + phi2_er) * er_res
                     v_step = torch.add(v_step, dx0_hat, alpha=-er_coeff)
+                    if has_ta:
+                        dot_av_s = float(er_norms[3])
+                        norm_a_sq_s = max(0.0, float(er_norms[4]))
+                        dot_vx_s = float(er_norms[5])
+                        norm_x_sq_s = max(1e-8, float(er_norms[6]))
+                        k_ta_s = dot_av_s / n_v_sq
+                        norm_r_perp_sq = max(0.0, norm_a_sq_s - k_ta_s * dot_av_s)
+                        g_par_ta, d_perp_ta, shrink_mcfm = compute_tacache_vde_mcfm_gains(
+                            t_val,
+                            t_next,
+                            dot_av_s,
+                            n_v_sq,
+                            math.sqrt(norm_r_perp_sq),
+                            dot_vx_s,
+                            norm_x_sq_s,
+                            mcfm_gamma=mcfm_gamma,
+                        )
+                        r_perp_ta = a_ta - k_ta_s * v
+                        ta_res = 1.0 / (1.0 + pade_eta * (norm_r_perp_sq / n_v_sq))
+                        v_step = v_step * (shrink_mcfm * (1.0 + tacache_gamma * (g_par_ta - 1.0)))
+                        v_step = torch.add(v_step, r_perp_ta, alpha=tacache_gamma * d_perp_ta * ta_res)
 
                 if (not apply_rk_readout) and prev_v is not None and (cd_omega > 0.0 or magnus_gamma > 0.0):
                     # Quantum Counterdiabatic Berry-Gauge Driving (Berry 2009 / Sels & Polkovnikov 2017)

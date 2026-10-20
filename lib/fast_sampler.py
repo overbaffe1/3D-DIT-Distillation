@@ -120,6 +120,12 @@ class SolverConfig:
     manifold_beta_l: float = 0.25
     exp_rosenbrock_integrator: bool = True
     exp_rosenbrock_gamma: float = 0.018
+    b0_post_msa_token_carving: bool = True
+    uncond_1tok_rcr_stride: int = 2
+    cachescope_worldcache_osi: bool = True
+    tacache_vde_povd: bool = True
+    tacache_povd_gamma: float = 0.016
+    mcfm_strang_prox_gamma: float = 0.012
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -513,6 +519,73 @@ def compute_exp_rosenbrock_phi_gains(
         phi1 = (ez - 1.0) / z
         phi2 = (ez - 1.0 - z) / (z * z)
     return float(lam), float(phi1), float(phi2)
+
+
+def compute_cachescope_worldcache_osi_weight(
+    probe_drift: float,
+    dx_drift: float,
+    dot_dy: float,
+    norm_dy_prev_sq: float,
+    rfc_io_ratio: float = 1.0,
+) -> float:
+    """
+    CacheScope Trajectory-Normalized Sensitivity (Lyu et al., arXiv:2610.12530, Oct 2026, Eqs. 6-10)
+    + WorldCache Optimal State Interpolation (OSI) Least-Squares Vector Projection (arXiv:2603.22286, Jul 2026, Eqs. 8-10)
+    + Relational Feature Caching (RFC / RFE) Input-Output Invariance (arXiv:2602.19506, Feb 2026, Eqs. 13-16):
+      1. CacheScope directional Jacobian gain per unit input displacement:
+             s_t = Delta_y_t / (Delta_x_t + eps)
+         isolates true network sensitivity lambda_t from trajectory speed Delta_x_t, yielding inverse
+         damping g_cs = 1 / (1 + 0.08 * max(0, s_t - 1.0)).
+      2. WorldCache OSI least-squares projection gain:
+             gamma_osi^* = clamp(<Delta_y_t, Delta_y_{t-1}> / (||Delta_y_{t-1}||_2^2 + eps), 0.0, 2.0)
+         naturally attenuating extrapolation when the feature trajectory curves (<Delta_y_t, Delta_y_{t-1}> < ||Delta_y||^2).
+      3. RFC input-output relational scaling blends `rfc_io_ratio` with `gamma_osi^*`.
+    """
+    s_t = max(0.0, float(probe_drift)) / max(1e-5, float(dx_drift))
+    g_cs = 1.0 / (1.0 + 0.08 * min(4.0, max(0.0, s_t - 1.0)))
+    if float(norm_dy_prev_sq) > 1e-10:
+        gamma_osi = min(2.0, max(0.0, float(dot_dy) / max(1e-10, float(norm_dy_prev_sq))))
+    else:
+        gamma_osi = 1.0
+    rfc_clamped = min(1.35, max(0.70, float(rfc_io_ratio)))
+    osi_blend = 0.88 + 0.08 * min(1.5, max(0.5, gamma_osi)) + 0.04 * rfc_clamped
+    w = g_cs * osi_blend
+    return float(min(1.15, max(0.82, w)))
+
+
+def compute_tacache_vde_mcfm_gains(
+    t_cur: float,
+    t_next: float,
+    dot_av: float,
+    norm_v_sq: float,
+    norm_r_perp: float,
+    dot_vx: float,
+    norm_x_sq: float,
+    mcfm_gamma: float = 0.012,
+) -> Tuple[float, float, float]:
+    """
+    TACache Parallel-Orthogonal Velocity Decomposition (POVD / TASU, Liu et al., arXiv:2605.16789, May 2026, Eqs. 3-4, 10-13)
+    + VDE Input-Adaptive Velocity Decomposition (Tan et al., arXiv:2605.23381v1, May 2026, Eqs. 4-7)
+    + Metriplectic Conditional Flow Matching (MCFM) Strang-Prox Shrinkage (Baheri & Lindemann, arXiv:2509.19526v2, Theorem 2):
+      1. Parallel magnitude rate & multiplicative exponential gain:
+             k_n = <a_n, v_n> / (||v_n||_2^2 + eps),   g_par = exp(clamp(k_n * h_n, -0.12, 0.12))
+      2. Dimensionless orthogonal turning score:
+             d_n = (||r_n^perp||_2 / (||v_n||_2 + eps)) * h_n
+      3. VDE parallel state coefficient & MCFM Strang-Prox dissipative shrinkage:
+             alpha_vde = <v_n, x_n> / (||x_n||_2^2 + eps)
+             shrink_mcfm = 1 / (1 + mcfm_gamma * max(0.0, alpha_vde) * h_n)
+    Returns (g_par, d_n, shrink_mcfm).
+    """
+    h = max(0.0, float(t_cur) - float(t_next))
+    v_sq = max(1e-8, float(norm_v_sq))
+    v_norm = math.sqrt(v_sq)
+    k_n = float(dot_av) / v_sq
+    kh = min(0.12, max(-0.12, k_n * h))
+    g_par = math.exp(kh)
+    d_n = min(0.35, max(0.0, (float(norm_r_perp) / max(1e-6, v_norm)) * h))
+    alpha_vde = float(dot_vx) / max(1e-8, float(norm_x_sq))
+    shrink_mcfm = 1.0 / (1.0 + max(0.0, float(mcfm_gamma)) * min(4.0, max(0.0, alpha_vde)) * h)
+    return float(g_par), float(d_n), float(min(1.0, max(0.92, shrink_mcfm)))
 
 
 
