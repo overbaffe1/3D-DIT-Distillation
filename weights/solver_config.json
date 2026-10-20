@@ -3151,5 +3151,8 @@
   "stork2_stages": 9,
   "interblock_gate_modulate_fusion": true,
   "batched_1tok_noncond_bmm": true,
-  "richardson_romberg_extrapolation": true
+  "richardson_romberg_extrapolation": true,
+  "fastercache_freq_decoupled_cfg": true,
+  "fastercache_hf_boost": 0.035,
+  "cayley_lie_orthogonal_step": true
 }

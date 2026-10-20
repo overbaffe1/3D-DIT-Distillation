@@ -145,6 +145,12 @@ class OptimizedLatDitRunner:
                 self.flow.unpatchify.weight.data = (
                     self.flow.unpatchify.weight.data.to(device=device, dtype=target_dtype).contiguous()
                 )
+        if hasattr(self.flow.patchify, "weight"):
+            self._patchify_w_cast = (
+                self.flow.patchify.weight.detach().to(device=device, dtype=target_dtype).contiguous()
+            )
+        else:
+            self._patchify_w_cast = None
 
         D = self.dim
         for block in self.flow.blocks:
@@ -754,7 +760,10 @@ class OptimizedLatDitRunner:
                 )
         else:
             # Patchify (for patch_size=1 on pre-sorted coords, this is a single linear projection)
-            x = F.linear(xt_sorted.to(dtype=compute_dtype), self.flow.patchify.weight.to(dtype=compute_dtype))
+            w_patch = getattr(self, "_patchify_w_cast", None)
+            if w_patch is None or w_patch.dtype != compute_dtype:
+                w_patch = self.flow.patchify.weight.to(dtype=compute_dtype)
+            x = F.linear(xt_sorted.to(dtype=compute_dtype), w_patch)
 
         use_1tok_uncond = uncond and self.solver_config.uncond_1token_condensation and (batch_size == 1)
         skip_cond_alloc = (
@@ -1403,12 +1412,12 @@ class OptimizedLatDitRunner:
                     pos_cr_sum = torch.addcmul(pos_cr_sum, cr_out_for_x, g_cr_2d, value=1.0)
 
             if b_idx == 0 and (not uncond) and use_subblock_crf:
-                x = fast_gate_add(x, cr_out_for_x, sizes, g_cr)
                 if cached_mid_delta is not None and (
                     getattr(self, "_last_pos_crf_after_b0_cr", None) is not None
                     and self._last_pos_crf_after_b0_cr.shape == (N, D)
                     and self._last_pos_crf_after_b0_cr.device == device
                 ):
+                    x = fast_gate_add(x, cr_out_for_x, sizes, g_cr)
                     # DBCache-FoCa Subblock-2 CRF (vipshop/cache-dit 2026 + FreqCa NeurIPS 2026):
                     # On Step 2 (pos), after updating 3D MSA + DINO Cross-Attn in Block 0,
                     # bypass Block 0's heavy FFN0(1536->8192) + 3x3x3 SparseConv + FFN1 and Blocks 1..23!
@@ -1430,8 +1439,11 @@ class OptimizedLatDitRunner:
                         )
                     break
                 else:
+                    # Fused Block-0 Cross-Attention Gate-Add + FFN LayerNorm & AdaLN Modulation in 1 Triton kernel!
+                    x, h_mlp = fast_gate_add_and_modulate(
+                        x, cr_out_for_x, sizes, g_cr, s_mlp, sh_mlp, use_triton=use_triton
+                    )
                     x_b0_cr = x
-                    h_mlp = fast_modulate(x, sizes, s_mlp, sh_mlp)
             else:
                 # Fused Cross-Attention Gate-Add + FFN LayerNorm & AdaLN Modulation in 1 Triton kernel!
                 x, h_mlp = fast_gate_add_and_modulate(
@@ -1655,6 +1667,9 @@ class OptimizedLatDitRunner:
         stork2_stages = int(getattr(self.solver_config, "stork2_stages", 9))
         stork2_beta = compute_stork2_beta(stork2_stages) if use_stork2 else 0.0
         use_romberg = bool(getattr(self.solver_config, "richardson_romberg_extrapolation", True))
+        use_fastercache_cfg = bool(getattr(self.solver_config, "fastercache_freq_decoupled_cfg", True))
+        fc_hf_boost = float(getattr(self.solver_config, "fastercache_hf_boost", 0.035))
+        use_cayley_lie = bool(getattr(self.solver_config, "cayley_lie_orthogonal_step", True))
         prev_v_pos_step: Optional[torch.Tensor] = None
         prev2_v_pos_step: Optional[torch.Tensor] = None
         num_blocks = len(self.flow.blocks)
@@ -1826,6 +1841,13 @@ class OptimizedLatDitRunner:
                             norm_nn = (neg_cand * neg_cand).sum().clamp_min(1e-6)
                             s_star = (dot_pn / norm_nn).clamp(0.90, 1.10)
                             cur_delta = v_pos - s_star * neg_cand
+                            if (not apply_rk_readout) and use_fastercache_cfg and fc_hf_boost > 0.0 and N > 1:
+                                # FasterCache Frequency-Decoupled CFG Reuse (ICLR 2025, Vchitect/FasterCache):
+                                # Decompose CFG delta into low-frequency DC mean and high-frequency spatial detail,
+                                # boosting high-frequency surface detail on skipped unconditional steps!
+                                delta_dc = cur_delta.mean(dim=0, keepdim=True)
+                                hf_gain = fc_hf_boost * max(0.0, 1.0 - t_eval)
+                                cur_delta = torch.add(cur_delta, cur_delta - delta_dc, alpha=hf_gain)
                         else:
                             cur_delta = v_pos - last_neg
                     elif cfg_mode == "delta_extrapolate" and prev_delta is not None:
@@ -1961,8 +1983,18 @@ class OptimizedLatDitRunner:
                         tau_c = 2.0 * t_val - 1.0
                         cheb_t2 = 2.0 * tau_c * tau_c - 1.0
                         eff_cd = eff_cd * (1.0 + 0.12 * cheb_t2)
-                        resolvent = 1.0 / (1.0 + pade_eta * ((dv_perp * dv_perp).sum() / v_norm_sq))
-                        v_step = torch.addcmul(v_step, dv_perp, resolvent, value=eff_cd)
+                        norm_ratio = (dv_perp * dv_perp).sum() / v_norm_sq
+                        resolvent = 1.0 / (1.0 + pade_eta * norm_ratio)
+                        if use_cayley_lie:
+                            # Quantum Cayley-Transform Isometric Lie-Group Step (Cayley 1846 / Hairer, Lubich & Wanner 2006):
+                            # Exact SO(N) rotation Cay(Omega) v = ((1 - theta^2/4)*v + eff_cd*dv_perp) / (1 + theta^2/4),
+                            # preserving the exact kinetic energy norm ||v||^2 to machine precision!
+                            theta_q = 0.25 * (eff_cd * eff_cd) * (resolvent * resolvent) * norm_ratio
+                            cayley_den = 1.0 / (1.0 + theta_q)
+                            v_step = v_step * ((1.0 - theta_q) * cayley_den)
+                            v_step = torch.addcmul(v_step, dv_perp, resolvent * cayley_den, value=eff_cd)
+                        else:
+                            v_step = torch.addcmul(v_step, dv_perp, resolvent, value=eff_cd)
                     else:
                         v_step = torch.add(v_step, dv_perp, alpha=eff_cd)
 

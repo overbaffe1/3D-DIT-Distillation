@@ -162,6 +162,9 @@ def test_pytorch_pipeline() -> None:
             assert hasattr(sol_model.runner.flow.blocks[-1], "_cond_1tok_cr_w")
             assert getattr(sol_model.runner, "_noncond_1tok_w_t", None) is not None
             assert getattr(sol_model.runner, "_noncond_1tok_b", None) is not None
+            assert getattr(sol_model.runner, "_patchify_w_cast", None) is not None
+            assert sol_model.runner.solver_config.fastercache_freq_decoupled_cfg is True
+            assert sol_model.runner.solver_config.cayley_lie_orthogonal_step is True
             from lib.fast_sampler import compute_stork2_beta
             beta9 = compute_stork2_beta(9)
             assert abs(beta9 - 0.46283549) < 1e-6, f"Unexpected STORK-2 beta_9: {beta9}"
