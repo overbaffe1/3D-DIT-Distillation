@@ -3149,5 +3149,7 @@
   "uncond_carrier_share": true,
   "stork2_stabilized_rk": true,
   "stork2_stages": 9,
-  "interblock_gate_modulate_fusion": true
+  "interblock_gate_modulate_fusion": true,
+  "batched_1tok_noncond_bmm": true,
+  "richardson_romberg_extrapolation": true
 }

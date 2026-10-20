@@ -160,6 +160,8 @@ def test_pytorch_pipeline() -> None:
             assert hasattr(sol_model.runner.flow.blocks[0], "_cond_1tok_msa_w")
             assert hasattr(sol_model.runner.flow.blocks[0], "_cond_1tok_q_and_out_cr_w")
             assert hasattr(sol_model.runner.flow.blocks[-1], "_cond_1tok_cr_w")
+            assert getattr(sol_model.runner, "_noncond_1tok_w_t", None) is not None
+            assert getattr(sol_model.runner, "_noncond_1tok_b", None) is not None
             from lib.fast_sampler import compute_stork2_beta
             beta9 = compute_stork2_beta(9)
             assert abs(beta9 - 0.46283549) < 1e-6, f"Unexpected STORK-2 beta_9: {beta9}"

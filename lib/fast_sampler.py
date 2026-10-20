@@ -72,6 +72,8 @@ class SolverConfig:
     stork2_stabilized_rk: bool = True
     stork2_stages: int = 9
     interblock_gate_modulate_fusion: bool = True
+    batched_1tok_noncond_bmm: bool = True
+    richardson_romberg_extrapolation: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

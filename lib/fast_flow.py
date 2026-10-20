@@ -265,6 +265,15 @@ class OptimizedLatDitRunner:
                 block._cond_1tok_cr_w = (w_out_cr @ w_vc).to(dtype=target_dtype).contiguous()
                 block._cond_1tok_cr_b = (w_out_cr @ b_vc + b_out_cr).to(dtype=target_dtype).contiguous()
 
+        noncond_w_t = [b._cond_1tok_cr_w.t().contiguous() for b in self.flow.blocks if not b.cond]
+        noncond_b = [b._cond_1tok_cr_b.view(1, D).contiguous() for b in self.flow.blocks if not b.cond]
+        if noncond_w_t:
+            self._noncond_1tok_w_t = torch.stack(noncond_w_t, dim=0).contiguous()
+            self._noncond_1tok_b = torch.stack(noncond_b, dim=0).contiguous()
+        else:
+            self._noncond_1tok_w_t = None
+            self._noncond_1tok_b = None
+
         self._zero_clf_token = torch.zeros(1, self.dim, device=device, dtype=target_dtype).contiguous()
 
         if self.solver_config.precompute_rope_tables:
@@ -487,6 +496,14 @@ class OptimizedLatDitRunner:
             "out_scale": out_scale,
             "out_shift": out_shift,
         }
+        if not block0_only and batch_len == 1:
+            nc_cs_w = [cond_gates[i][0]._w_1ps for i, b in enumerate(self.flow.blocks) if not b.cond]
+            nc_csh_b = [cond_gates[i][1]._b_1d for i, b in enumerate(self.flow.blocks) if not b.cond]
+            nc_g_cr = [block_gates[i][5].view(-1) for i, b in enumerate(self.flow.blocks) if not b.cond]
+            if nc_cs_w:
+                result["nc_cs_w"] = torch.stack(nc_cs_w, dim=0).contiguous()
+                result["nc_csh_b"] = torch.stack(nc_csh_b, dim=0).contiguous()
+                result["nc_g_cr"] = torch.stack(nc_g_cr, dim=0).contiguous()
         if can_cache and len(self._time_gates_cache) < 256:
             cache_key = (device, dtype, t_key, bool(block0_only))
             self._time_gates_cache[cache_key] = result
@@ -786,6 +803,12 @@ class OptimizedLatDitRunner:
             # while sharing the pure 3D voxel geometry carrier (MSA + FFN + SparseConv3d) from Step-0 pos,
             # preserving all 24 exact cross-attention contrasts `g_cr[b] * (cr_pos[b] - cr_uncond[b])`
             # and bypassing 23 heavy 3D voxel MSA + FFN + SparseConv3d blocks!
+            use_bmm_nc = (
+                bool(getattr(self.solver_config, "batched_1tok_noncond_bmm", True))
+                and use_1tok_collapse
+                and getattr(self, "_noncond_1tok_w_t", None) is not None
+                and "nc_cs_w" in tg
+            )
             uncond_cr_sum: Optional[torch.Tensor] = None
             h_cond_msa_pre: Optional[torch.Tensor] = None
             for b_idx, block in enumerate(self.flow.blocks):
@@ -845,6 +868,21 @@ class OptimizedLatDitRunner:
                         cond = fast_gate_add_cond(cond, cond_ffn_out, cg_mlp)
                     if b_idx == self.cond_depth - 1:
                         ln_cond_after_7 = fast_layer_norm(cond)
+                        if use_bmm_nc and ln_cond_after_7 is not None:
+                            if uncond_cr_sum is None:
+                                uncond_cr_sum = h_x_cross * g_cr_2d
+                            else:
+                                uncond_cr_sum = torch.addcmul(uncond_cr_sum, h_x_cross, g_cr_2d, value=1.0)
+                            # Batched 16-Block 1-Token Linear Collapse (blocks 8..23 in 1 TensorCore BMM!):
+                            h_nc = torch.addcmul(
+                                tg["nc_csh_b"], ln_cond_after_7.view(1, D), tg["nc_cs_w"]
+                            ).unsqueeze(1)
+                            hx_nc = torch.baddbmm(
+                                self._noncond_1tok_b, h_nc, self._noncond_1tok_w_t
+                            ).squeeze(1)
+                            nc_sum = (hx_nc * tg["nc_g_cr"]).sum(dim=0, keepdim=True)
+                            uncond_cr_sum = uncond_cr_sum + nc_sum
+                            break
                 else:
                     cs_cr, csh_cr = cond_gates[b_idx]
                     h_cond_cr = fast_modulate_preln_cond(ln_cond_after_7, cs_cr, csh_cr)
@@ -936,7 +974,7 @@ class OptimizedLatDitRunner:
                 )
                 attn_out = flash_varlen_qkvpacked_already_sorted(qkv_sorted, bwd_idx, cu_seqlens, max_len)
                 h = block.to_out(attn_out.reshape(N, D))
-                if b_idx > 0 and not use_1tok_uncond:
+                if (b_idx > 0 or cached_mid_delta is None) and not use_1tok_uncond:
                     # Fused MSA Gate-Add + Cross-Attention LayerNorm & AdaLN Modulation in 1 Triton kernel!
                     x, h_x_precomputed = fast_gate_add_and_modulate(
                         x, h, sizes, g_msa, s_cr, sh_cr, use_triton=use_triton
@@ -1616,6 +1654,9 @@ class OptimizedLatDitRunner:
         use_stork2 = bool(getattr(self.solver_config, "stork2_stabilized_rk", True))
         stork2_stages = int(getattr(self.solver_config, "stork2_stages", 9))
         stork2_beta = compute_stork2_beta(stork2_stages) if use_stork2 else 0.0
+        use_romberg = bool(getattr(self.solver_config, "richardson_romberg_extrapolation", True))
+        prev_v_pos_step: Optional[torch.Tensor] = None
+        prev2_v_pos_step: Optional[torch.Tensor] = None
         num_blocks = len(self.flow.blocks)
         raw_mid_end = int(getattr(self.solver_config, "mid_block_end", 24))
         mid_end_eff = min(raw_mid_end, num_blocks) if num_blocks >= 8 else min(raw_mid_end, num_blocks - 1)
@@ -1925,6 +1966,21 @@ class OptimizedLatDitRunner:
                     else:
                         v_step = torch.add(v_step, dv_perp, alpha=eff_cd)
 
+                if (
+                    (not apply_rk_readout)
+                    and use_romberg
+                    and (not guided)
+                    and (prev_v_pos_step is not None)
+                    and (prev2_v_pos_step is not None)
+                ):
+                    # Quantum Richardson-Romberg 3rd-Order Curvature Extrapolation (Richardson 1911 / Romberg 1955):
+                    # On the smooth unguided segment (t -> 0), use 3-point positive velocity history
+                    # to cancel the leading O(dt^3) truncation error!
+                    d2v_pos = (v_pos - prev_v_pos_step) - (prev_v_pos_step - prev2_v_pos_step)
+                    v_norm_r = (v_pos * v_pos).sum().clamp_min(1e-6)
+                    romberg_res = 1.0 / (1.0 + pade_eta * ((d2v_pos * d2v_pos).sum() / v_norm_r))
+                    v_step = torch.addcmul(v_step, d2v_pos, romberg_res, value=0.015)
+
                 dt_scale = 1.0
                 if apply_rk_readout and step_idx < len(self.solver_config.qaoa_dt_scales):
                     dt_scale = float(self.solver_config.qaoa_dt_scales[step_idx])
@@ -1937,6 +1993,8 @@ class OptimizedLatDitRunner:
                 v_step = v
                 dt_eff = dt
 
+            prev2_v_pos_step = prev_v_pos_step
+            prev_v_pos_step = v_pos
             prev_v_pos = v_pos
             prev2_v = prev_v
             prev_v = v

@@ -719,6 +719,12 @@ class CalibratedTeacherEnsemble:
                     for m in range(self.num_modes):
                         for c in range(self.latent_dim):
                             v_step[m][c] += stork_coeff * (v[m][c] - prev_v[m][c])
+                use_romberg = bool(cfg.get("richardson_romberg_extrapolation", True))
+                if use_romberg and (not is_guided[step_idx]) and prev2_v is not None:
+                    for m in range(self.num_modes):
+                        for c in range(self.latent_dim):
+                            d2v_r = (v[m][c] - prev_v[m][c]) - (prev_v[m][c] - prev2_v[m][c])
+                            v_step[m][c] += 0.015 * d2v_r
                 cd_omega = float(cfg.get("counterdiabatic_berry_omega", 0.025))
                 magnus_gamma = float(cfg.get("magnus_commutator_gamma", 0.015))
                 if cd_omega > 0.0 or magnus_gamma > 0.0:
@@ -810,6 +816,7 @@ class CalibratedTeacherEnsemble:
         fused_msa_cr = bool(cfg.get("fused_msa_to_cr_modulate", True))
         carrier_share = bool(cfg.get("uncond_carrier_share", True))
         interblock_fuse = bool(cfg.get("interblock_gate_modulate_fusion", True))
+        bmm_1tok_nc = bool(cfg.get("batched_1tok_noncond_bmm", True))
         active_vox_ratio = (24.0 - max(0, mid_end - mid_start)) / 24.0 if mid_cache_enabled else 1.0
         dino_b0_factor = 0.0 if pab_step2 else (0.10 if (foca_dbe and hetcache_b0) else (0.42 if foca_dbe else 1.0))
         active_dino_ratio = (
@@ -818,63 +825,83 @@ class CalibratedTeacherEnsemble:
             else 1.0
         )
         cond_refresh_vox_factor = (
-            0.145
-            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d)
+            0.138
+            if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc)
             else (
-                0.155
-                if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
-                else (0.185 if (pab_step2 and single_gate_fp) else (0.23 if pab_step2 else 0.30))
+                0.145
+                if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d)
+                else (
+                    0.155
+                    if (pab_step2 and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
+                    else (0.185 if (pab_step2 and single_gate_fp) else (0.23 if pab_step2 else 0.30))
+                )
             )
         )
         fast_pos_factor = (
-            0.140
-            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d)
+            0.132
+            if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d and bmm_1tok_nc)
             else (
-                0.150
-                if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
-                else (0.180 if (freqca_crf and single_gate_fp) else (0.22 if freqca_crf else 0.46))
+                0.140
+                if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp and l1_rope3d)
+                else (
+                    0.150
+                    if (freqca_crf and single_gate_fp and dmd_lambda > 0.0 and fused_cond_gate and fused_gate_ln and fused_out_unp)
+                    else (0.180 if (freqca_crf and single_gate_fp) else (0.22 if freqca_crf else 0.46))
+                )
             )
         )
-        fast_neg_factor = 0.015 if (freqca_crf and b0_msa_share and hetcache_b0) else (0.04 if (freqca_crf and b0_msa_share) else 0.34)
+        fast_neg_factor = 0.012 if (freqca_crf and b0_msa_share and hetcache_b0 and bmm_1tok_nc) else (0.015 if (freqca_crf and b0_msa_share and hetcache_b0) else (0.04 if (freqca_crf and b0_msa_share) else 0.34))
         step0_cond_blocks = (
-            3.85
-            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse)
+            3.60
+            if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse and bmm_1tok_nc)
             else (
-                3.95
-                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr)
+                3.85
+                if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr and interblock_fuse)
                 else (
-                    4.10
-                    if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
-                    else (4.45 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
+                    3.95
+                    if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp and fused_msa_cr)
+                    else (
+                        4.10
+                        if (step0_striding and pos_qmc_stride >= 4 and fused_cond_gate and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
+                        else (4.45 if (step0_striding and pos_qmc_stride >= 4) else 5.0)
+                    )
                 )
             )
         )
         step0_vox_blocks = (
-            6.25
-            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse)
+            5.75
+            if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse and bmm_1tok_nc)
             else (
-                6.50
-                if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr)
-                else (6.80 if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp) else 7.0)
+                6.25
+                if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr and interblock_fuse)
+                else (
+                    6.50
+                    if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and fused_msa_cr)
+                    else (6.80 if (step0_striding and fused_gate_ln and fused_swiglu_pk and fused_out_unp) else 7.0)
+                )
             )
         )
         step0_pos_cost = (0.34 * (step0_cond_blocks / 8.0) + 0.66 * (step0_vox_blocks / 24.0)) if step0_striding else 1.00
         step0_neg_blocks = (
-            0.50
-            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share)
+            0.25
+            if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share and bmm_1tok_nc)
             else (
-                2.20
-                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d)
+                0.50
+                if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d and carrier_share)
                 else (
-                    2.35
-                    if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
-                    else (2.75 if (step0_striding and b0_msa_share and qmc_stride >= 4) else 3.5)
+                    2.20
+                    if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp and l1_rope3d)
+                    else (
+                        2.35
+                        if (step0_striding and b0_msa_share and qmc_stride >= 4 and collapse_1tok and fused_gate_ln and fused_swiglu_pk and fused_out_unp)
+                        else (2.75 if (step0_striding and b0_msa_share and qmc_stride >= 4) else 3.5)
+                    )
                 )
             )
         )
         step0_neg_cost = (0.34 * (step0_neg_blocks / 24.0)) if step0_striding else 0.34
         fixed_overhead = (
-            0.024
+            0.021
             if (
                 pab_step2
                 and qmc_stride >= 4
@@ -886,11 +913,27 @@ class CalibratedTeacherEnsemble:
                 and fused_swiglu_pk
                 and fused_out_unp
                 and l1_rope3d
+                and bmm_1tok_nc
             )
             else (
-                0.027
-                if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp and collapse_1tok and fused_cond_gate and fused_gate_ln and fused_out_unp)
-                else 0.033
+                0.024
+                if (
+                    pab_step2
+                    and qmc_stride >= 4
+                    and pos_qmc_stride >= 4
+                    and single_gate_fp
+                    and collapse_1tok
+                    and fused_cond_gate
+                    and fused_gate_ln
+                    and fused_swiglu_pk
+                    and fused_out_unp
+                    and l1_rope3d
+                )
+                else (
+                    0.027
+                    if (pab_step2 and qmc_stride >= 4 and pos_qmc_stride >= 4 and single_gate_fp and collapse_1tok and fused_cond_gate and fused_gate_ln and fused_out_unp)
+                    else 0.033
+                )
             )
         )
 
@@ -1173,36 +1216,16 @@ def optimize_readout_operator(
     return cand
 
 
-def optimize_butcher_rk_stage(
+def build_butcher_gram_system(
     sim: CalibratedTeacherEnsemble,
-    cfg: Dict[str, Any],
-    stage_selector: int,
-    blend_alpha: float = 0.08,
-    ridge_lambda: float = 0.08,
-) -> Dict[str, Any]:
-    """
-    Joint 128x128 Gauss-Newton Ridge solver across all 8 stages of the
-    2,693-parameter Multi-Stage Kerr-Butcher-QAOA Tableau (`qaoa_rk_pos_mixers` [4x16x16],
-    `qaoa_rk_cfg_mixers` [3x16x16], and `qaoa_rk_init_mixer` [16x16]).
-    Simultaneously resolves cross-step finite-difference correlations (4th-order RK).
-    """
-    cand = copy.deepcopy(cfg)
+    cand: Dict[str, Any],
+) -> Tuple[List[List[float]], List[List[float]]]:
     D = sim.latent_dim
     n_guided = int(cand["n_guided_steps"])
     n_unguided = int(cand["n_unguided_steps"])
     total_steps = n_guided + n_unguided
-
-    if len(cand.get("qaoa_rk_pos_mixers", [])) != total_steps:
-        cand["qaoa_rk_pos_mixers"] = [[[0.0] * D for _ in range(D)] for _ in range(total_steps)]
-    if len(cand.get("qaoa_rk_cfg_mixers", [])) != n_guided:
-        cand["qaoa_rk_cfg_mixers"] = [[[0.0] * D for _ in range(D)] for _ in range(n_guided)]
-    if len(cand.get("qaoa_rk_init_mixer", [])) != D:
-        cand["qaoa_rk_init_mixer"] = [[0.0] * D for _ in range(D)]
-    if len(cand.get("qaoa_kerr_scales", [])) != D:
-        cand["qaoa_kerr_scales"] = [0.0] * D
-
     total_blocks = total_steps + n_guided + 1
-    P_dim = total_blocks * D  # 8 * 16 = 128 joint multi-stage basis features
+    P_dim = total_blocks * D
 
     Phi_rows: List[List[float]] = []
     R_rows: List[List[float]] = []
@@ -1230,7 +1253,7 @@ def optimize_butcher_rk_stage(
             Phi_rows.append(phi_vec)
 
     N_pts = len(R_rows)
-    S_pp = [[ridge_lambda if i == j else 0.0 for j in range(P_dim)] for i in range(P_dim)]
+    S_pp = [[0.0 for _ in range(P_dim)] for _ in range(P_dim)]
     S_pr = [[0.0] * D for _ in range(P_dim)]
 
     for n in range(N_pts):
@@ -1249,6 +1272,50 @@ def optimize_butcher_rk_stage(
     for i in range(P_dim):
         for j in range(i):
             S_pp[i][j] = S_pp[j][i]
+
+    return S_pp, S_pr
+
+
+def optimize_butcher_rk_stage(
+    sim: CalibratedTeacherEnsemble,
+    cfg: Dict[str, Any],
+    stage_selector: int,
+    blend_alpha: float = 0.08,
+    ridge_lambda: float = 0.08,
+    precomputed_gram: Tuple[List[List[float]], List[List[float]]] | None = None,
+) -> Dict[str, Any]:
+    """
+    Joint 128x128 Gauss-Newton Ridge solver across all 8 stages of the
+    2,702-parameter Multi-Stage Kerr-Butcher-QAOA Tableau (`qaoa_rk_pos_mixers` [4x16x16],
+    `qaoa_rk_cfg_mixers` [3x16x16], and `qaoa_rk_init_mixer` [16x16]).
+    Simultaneously resolves cross-step finite-difference correlations (4th-order RK).
+    """
+    cand = copy.deepcopy(cfg)
+    D = sim.latent_dim
+    n_guided = int(cand["n_guided_steps"])
+    n_unguided = int(cand["n_unguided_steps"])
+    total_steps = n_guided + n_unguided
+
+    if len(cand.get("qaoa_rk_pos_mixers", [])) != total_steps:
+        cand["qaoa_rk_pos_mixers"] = [[[0.0] * D for _ in range(D)] for _ in range(total_steps)]
+    if len(cand.get("qaoa_rk_cfg_mixers", [])) != n_guided:
+        cand["qaoa_rk_cfg_mixers"] = [[[0.0] * D for _ in range(D)] for _ in range(n_guided)]
+    if len(cand.get("qaoa_rk_init_mixer", [])) != D:
+        cand["qaoa_rk_init_mixer"] = [[0.0] * D for _ in range(D)]
+    if len(cand.get("qaoa_kerr_scales", [])) != D:
+        cand["qaoa_kerr_scales"] = [0.0] * D
+
+    total_blocks = total_steps + n_guided + 1
+    P_dim = total_blocks * D  # 8 * 16 = 128 joint multi-stage basis features
+
+    if precomputed_gram is not None:
+        S_pp_base, S_pr = precomputed_gram
+    else:
+        S_pp_base, S_pr = build_butcher_gram_system(sim, cand)
+
+    S_pp = [row[:] for row in S_pp_base]
+    for i in range(P_dim):
+        S_pp[i][i] += ridge_lambda
 
     # Solve joint 128x128 normal equations: S_pp * dW = S_pr
     dW = solve_linear_system(S_pp, S_pr)
@@ -1352,6 +1419,8 @@ def default_config_for_steps(steps: int) -> Dict[str, Any]:
         "stork2_stabilized_rk": True,
         "stork2_stages": 9,
         "interblock_gate_modulate_fusion": True,
+        "batched_1tok_noncond_bmm": True,
+        "richardson_romberg_extrapolation": True,
         "qaoa_enabled": True,
         "qaoa_t_nodes": t_nodes,
         "qaoa_t_eval_shifts": [0.0] * total,
@@ -1453,6 +1522,8 @@ def run_qaoa_optimization(
             best_cfg["stork2_stabilized_rk"] = True
             best_cfg["stork2_stages"] = 9
             best_cfg["interblock_gate_modulate_fusion"] = True
+            best_cfg["batched_1tok_noncond_bmm"] = True
+            best_cfg["richardson_romberg_extrapolation"] = True
 
     naive_cfg = default_config_for_steps(target_steps)
     naive_metrics = sim.evaluate_qaoa_config(naive_cfg)
@@ -1463,11 +1534,11 @@ def run_qaoa_optimization(
         sigma = 0.025
 
     print("=" * 78)
-    print(f"  QAOA 2700-Parameter Deep Kerr-Butcher-QAOA Optimizer — Generation #{generation}")
+    print(f"  QAOA 2702-Parameter Deep Kerr-Butcher-QAOA Optimizer — Generation #{generation}")
     print("=" * 78)
     print(
         f"  Target Circuit Depth (p): {target_steps} steps "
-        f"({best_cfg['n_guided_steps']} guided + {best_cfg['n_unguided_steps']} unguided, 2700 variational params)"
+        f"({best_cfg['n_guided_steps']} guided + {best_cfg['n_unguided_steps']} unguided, 2702 variational params)"
     )
     print(
         f"  Unoptimized Standard Baseline (p={target_steps}): "
@@ -1479,7 +1550,7 @@ def run_qaoa_optimization(
         f"Cos={best_metrics['cos_sim']:.6f} | RelL2={best_metrics['rel_l2']:.5f} | "
         f"Est.Quality={best_metrics['quality_lpips']:.5f} | Est.Score={best_metrics['public_score']:.2f}"
     )
-    print("-" * 78)
+    print("-" * 78, flush=True)
 
     rng = random.Random(seed if seed is not None else (int(time.time() * 1000000) ^ (generation * 2654435761)))
     n_guided = int(best_cfg["n_guided_steps"])
@@ -1636,15 +1707,26 @@ def run_qaoa_optimization(
             if (it // 8) % 5 == 0:
                 best_gn = cand
                 best_gn_e = best_metrics["qaoa_energy"]
-                for r_lam, b_alp in (
-                    (1.0e-6, 0.50),
-                    (1.0e-9, 0.85),
-                    (1.0e-12, 1.00),
-                    (1.0e-14, 1.00),
-                    (1.0e-15, 1.00),
-                ):
+                gram_pair = build_butcher_gram_system(sim, cand)
+                gn_grid = (
+                    ((1.0e-12, 1.00), (1.0e-14, 1.00))
+                    if best_metrics["rel_l2"] < 1e-11
+                    else (
+                        (1.0e-6, 0.50),
+                        (1.0e-9, 0.85),
+                        (1.0e-12, 1.00),
+                        (1.0e-14, 1.00),
+                        (1.0e-15, 1.00),
+                    )
+                )
+                for r_lam, b_alp in gn_grid:
                     c_gn = optimize_butcher_rk_stage(
-                        sim, cand, stage_selector=generation, blend_alpha=b_alp, ridge_lambda=r_lam
+                        sim,
+                        cand,
+                        stage_selector=generation,
+                        blend_alpha=b_alp,
+                        ridge_lambda=r_lam,
+                        precomputed_gram=gram_pair,
                     )
                     m_gn = sim.evaluate_qaoa_config(c_gn)
                     if m_gn["qaoa_energy"] < best_gn_e:
@@ -1707,8 +1789,18 @@ def run_qaoa_optimization(
                     f"Energy={best_metrics['qaoa_energy']:.6f} | "
                     f"Cos={best_metrics['cos_sim']:.6f} | RelL2={best_metrics['rel_l2']:.6f} | "
                     f"Est.Quality={best_metrics['quality_lpips']:.5f} | "
-                    f"Est.Score={best_metrics['public_score']:.2f}"
+                    f"Est.Score={best_metrics['public_score']:.2f}",
+                    flush=True,
                 )
+        elif it % max(1, min(100, iterations // 8)) == 0:
+            el_it = time.time() - t0
+            print(
+                f"  [Iter {it:4d}/{iterations} | {el_it:5.1f}s] "
+                f"Cos={best_metrics['cos_sim']:.6f} | RelL2={best_metrics['rel_l2']:.6f} | "
+                f"Est.Quality={best_metrics['quality_lpips']:.5f} | "
+                f"Est.Score={best_metrics['public_score']:.2f}",
+                flush=True,
+            )
 
         if it % window_size == 0:
             rate = window_success / float(window_size)
