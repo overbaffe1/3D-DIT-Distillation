@@ -20,33 +20,21 @@ Successfully built and validated: /home/runner/work/3D-DIT-Distillation/3D-DIT-D
   root=/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/submission.zip, ok=True, errors=[], notes=['missing non-empty weights/; eval will use organizer lat_dit weights']
    [PASS] Submission format verified.
 2. Testing Solution class contract & numerical equivalence...
-   pos_pred max_abs_diff=1.43e-06, cos_sim=0.99999976
-   neg_pred (1-token vs 4101-token) max_abs_diff=3.58e-06, cos_sim=1.00000012
-Traceback (most recent call last):
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 198, in <module>
-    test_pytorch_pipeline()
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/tools/test_solution.py", line 179, in test_pytorch_pipeline
-    out_latents = sol_model.generate(
-                  ^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/baseline_repo/3dgen-main/kandi3d_image23d/lat_dit_protocol.py", line 118, in generate
-    result = self.generate_impl(
-             ^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/solution.py", line 241, in generate_impl
-    return self.runner.sample_fast(
-           ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 1974, in sample_fast
-    v_neg = self.forward_flow_fast(
-            ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
-    return func(*args, **kwargs)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/3D-DIT-Distillation/3D-DIT-Distillation/lib/fast_flow.py", line 873, in forward_flow_fast
-    x, sizes, tg["out_scale"], tg["out_shift"], self._unpatchify_w_fp32, use_triton=use_triton
-                                                                                    ^^^^^^^^^^
-UnboundLocalError: cannot access local variable 'use_triton' where it is not associated with a value
+   pos_pred max_abs_diff=1.67e-06, cos_sim=0.99999976
+   neg_pred (1-token vs 4101-token) max_abs_diff=4.99e-06, cos_sim=1.00000012
+   generate() output shape=(512, 16), metadata={'generator_class': 'solution.Solution', 'inputs': {'sampling': {'guidance_scale': 2.5, 'cfg_range': [0.5, 1.0], 'rescale_t': 3.0, 'num_inference_steps': 4}, 'sampling_kwargs': {}, 'batch_size': 1, 'num_voxels': [512], 'generator_seed': 123}, 'elapsed_seconds': 4.073406917, 'status': 'ok'}
+   [PASS] PyTorch pipeline & numerical equivalence verified.
+Streaming flow.blocks.0.* real pretrained weights sequentially...
+Loaded 3 real pretrained tensors from flow.blocks.0 in 15.8s
+[Equivalence] pos_pred: max_diff=1.19e-06, cos=1.00000036, time=1.958s -> 1.991s
+[Equivalence] neg_pred (1-token vs 4101-token): max_diff=4.89e-06, cos=0.99999976, time=1.982s -> 0.242s (8.18x faster)
+
+Running 50-step baseline teacher trajectory...
+Teacher 50-step finished in 0.91s
+  euler_20_naive                    : rel_l2=0.3121, cos=0.957976, speedup=2.27x
+  piecewise_euler_20_exact          : rel_l2=0.2794, cos=0.960206, speedup=2.60x
+  piecewise_ab2_20_exact            : rel_l2=0.2794, cos=0.960206, speedup=2.59x
+  piecewise_ab2_16_stride2_reuse    : rel_l2=0.2595, cos=0.966500, speedup=2.47x
+  piecewise_ab2_16_stride2_extrap   : rel_l2=0.3090, cos=0.951302, speedup=2.97x
+  piecewise_ab2_14_stride2_extrap   : rel_l2=0.4859, cos=0.879178, speedup=2.96x
+  piecewise_ab2_12_stride2_extrap   : rel_l2=0.3589, cos=0.937292, speedup=2.88x
