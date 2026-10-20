@@ -3164,5 +3164,9 @@
   "cab_defect_gamma": 0.022,
   "dicache_dcta_probe": true,
   "pab_noncond_cr_stride": 2,
-  "prestacked_qknorm_scale": true
+  "prestacked_qknorm_scale": true,
+  "hetcache_cond_msa_stride": 2,
+  "cond_dino_kv_qmc_stride": 4,
+  "stork4_rock4_finishing": true,
+  "stork4_gamma": 0.018
 }

@@ -188,9 +188,12 @@ def test_pytorch_pipeline() -> None:
             assert getattr(sol_model.runner, "_last_pos_x_without_cr", None) is not None
             assert getattr(sol_model.runner, "_last_pos_kv_x_list", None) is not None
             assert getattr(sol_model.runner.flow.blocks[0].qk_norm._q_scale_cast, "_qk_stacked", None) is not None
-            from lib.fast_sampler import compute_cab_nsr_step_ratio
+            assert getattr(sol_model.runner.flow.blocks[0], "_cond_to_q_cross_slice_w", None) is not None
+            from lib.fast_sampler import compute_cab_nsr_step_ratio, compute_stork4_rock4_weights
             r_cab = compute_cab_nsr_step_ratio(0.95, 0.72, 0.44)
             assert 0.20 <= r_cab <= 1.5
+            w_c, w_p1, w_p2 = compute_stork4_rock4_weights(0.20, 0.18, 0.15)
+            assert abs(w_c + w_p1 + w_p2) < 1e-6 and w_c > 0.0 and w_p1 < 0.0 and w_p2 > 0.0
             meta = sol_model.last_run_metadata
             assert meta is not None and "elapsed_seconds" in meta and meta.get("status") == "ok"
             print(f"   generate() output shape={tuple(out_latents[0].shape)}, metadata={meta}")

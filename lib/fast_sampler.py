@@ -88,6 +88,10 @@ class SolverConfig:
     dicache_dcta_probe: bool = True
     pab_noncond_cr_stride: int = 2
     prestacked_qknorm_scale: bool = True
+    hetcache_cond_msa_stride: int = 2
+    cond_dino_kv_qmc_stride: int = 4
+    stork4_rock4_finishing: bool = True
+    stork4_gamma: float = 0.018
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -235,6 +239,27 @@ def compute_cab_nsr_step_ratio(t_prev: float, t_cur: float, t_next: float) -> fl
     h_prev = max(1e-6, rho_prev - rho_cur)
     h_cur = max(1e-6, rho_cur - rho_next)
     return float(min(1.5, max(0.2, h_cur / h_prev)))
+
+
+def compute_stork4_rock4_weights(h_prev2: float, h_prev1: float, h_cur: float) -> Tuple[float, float, float]:
+    """
+    Non-uniform 3-point Lagrange second-derivative curvature weights for the STORK-4 / ROCK4
+    4-stage composition finishing procedure (Tan, Wang, Bertozzi & Ryu, ICLR 2026, arXiv:2505.24210v2;
+    Abdulle, SIAM J. Sci. Comput. 2002):
+        v''(t_i) = 2 / (h1 * h2 * (h1 + h2)) * (h1 * v_{i-2} - (h1 + h2) * v_{i-1} + h2 * v_i)
+    scaled by h_cur^2 / 6 (exact 3rd/4th-order composition quadrature weight sum_j b_j c_j^2 / 2 = 1/6).
+    Returns (w_cur, w_prev1, w_prev2) such that w_cur * v_i + w_prev1 * v_{i-1} + w_prev2 * v_{i-2} = (h_cur^2 / 6) * v''(t_i).
+    """
+    h1 = max(1e-4, float(h_prev1))
+    h2 = max(1e-4, float(h_prev2))
+    hc = max(1e-4, float(h_cur))
+    r1 = min(1.5, hc / h1)
+    r2 = min(1.5, hc / h2)
+    scale = (r1 * r2) / (3.0 * (h1 + h2))
+    w_cur = scale * h2
+    w_prev1 = -scale * (h1 + h2)
+    w_prev2 = scale * h1
+    return float(w_cur), float(w_prev1), float(w_prev2)
 
 
 

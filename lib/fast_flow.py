@@ -52,6 +52,7 @@ from lib.fast_sampler import (
     compute_cab_nsr_step_ratio,
     compute_flow_unipc_bh2_scale,
     compute_stork2_beta,
+    compute_stork4_rock4_weights,
     get_qaoa_eval_timesteps,
     should_eval_cond,
     should_eval_uncond,
@@ -195,7 +196,13 @@ class OptimizedLatDitRunner:
                 block._cond_to_v_b = (
                     block.cond_to_qkv.bias[2 * D :].contiguous() if block.cond_to_qkv.bias is not None else None
                 )
-                # In cond_to_qkv_cross ([3*D, D]), slice [D:3*D] is K_cc, V_cc only (used when skip_cond_out=True!)
+                # In cond_to_qkv_cross ([3*D, D]), slice [:D] is Q_cc only and slice [D:3*D] is K_cc, V_cc only
+                block._cond_to_q_cross_slice_w = block.cond_to_qkv_cross.weight[:D, :].contiguous()
+                block._cond_to_q_cross_slice_b = (
+                    block.cond_to_qkv_cross.bias[:D].contiguous()
+                    if block.cond_to_qkv_cross.bias is not None
+                    else None
+                )
                 block._cond_to_kv_cross_slice_w = block.cond_to_qkv_cross.weight[D:, :].contiguous()
                 block._cond_to_kv_cross_slice_b = (
                     block.cond_to_qkv_cross.bias[D:].contiguous()
@@ -833,6 +840,8 @@ class OptimizedLatDitRunner:
         use_b7_fuse = bool(getattr(self.solver_config, "fused_b7_gate_ln_cond", True))
         use_dicache_dcta = bool(getattr(self.solver_config, "dicache_dcta_probe", True))
         pab_nc_stride = int(getattr(self.solver_config, "pab_noncond_cr_stride", 2))
+        cond_msa_stride = int(getattr(self.solver_config, "hetcache_cond_msa_stride", 2))
+        cond_kv_qmc_stride = int(getattr(self.solver_config, "cond_dino_kv_qmc_stride", 4))
         dmd_lambda = float(getattr(self.solver_config, "dmd_exp_decay_lambda", 0.015))
         use_1tok_collapse = bool(getattr(self.solver_config, "fused_1tok_linear_collapse", True))
         eff_mid_scale = (
@@ -1074,7 +1083,15 @@ class OptimizedLatDitRunner:
             and (not need_full_kv_cc)
             and (cached_cond_block7 is None)
         )
+        use_cond_msa_stride = (
+            (not uncond)
+            and (cond_msa_stride > 1)
+            and return_mid_delta
+            and (not need_full_kv_cc)
+            and (cached_cond_block7 is None)
+        )
         prev_nc_cr_out: Optional[torch.Tensor] = None
+        prev_cond_msa_proj: Optional[torch.Tensor] = None
 
         for b_idx, block in enumerate(self.flow.blocks):
             if can_mid_cache:
@@ -1366,6 +1383,13 @@ class OptimizedLatDitRunner:
                         cr_out_for_x = cr_proj_out
                 else:
                     L = cond.shape[1]
+                    will_reuse_cond_msa = (
+                        use_cond_msa_stride
+                        and (b_idx > 0)
+                        and (b_idx < self.cond_depth - 1)
+                        and (b_idx % cond_msa_stride != 0)
+                        and (prev_cond_msa_proj is not None)
+                    )
                     if (
                         b_idx == 0
                         and (not uncond)
@@ -1379,6 +1403,14 @@ class OptimizedLatDitRunner:
                         # reuse their O(L^2) self-attention output projection modulated by current `cg_msa(t)`!
                         cond, h_cond_cr = fast_gate_add_and_modulate_cond(
                             cond, self._last_b0_cond_msa_out, cg_msa, cs_cr, csh_cr, use_triton=use_triton
+                        )
+                    elif will_reuse_cond_msa and prev_cond_msa_proj is not None:
+                        # HetCache (arXiv:2603.24260) + DuCa (ToCa-v2) Alternating Conditioning Self-Attention Reuse:
+                        # In odd intermediate conditioning blocks (1, 3, 5), reuse the previous even block's
+                        # O(L^2) DINO self-attention projection with the current block's exact gate `cg_msa[b_idx]`!
+                        h_cond_msa_precomputed = None
+                        cond, h_cond_cr = fast_gate_add_and_modulate_cond(
+                            cond, prev_cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
                         )
                     else:
                         h_cond = (
@@ -1397,11 +1429,16 @@ class OptimizedLatDitRunner:
                         cond_msa_proj = block.cond_to_out(h_cond.reshape(batch_size, L, D))
                         if b_idx == 0 and not uncond:
                             self._last_b0_cond_msa_out = cond_msa_proj
+                        if use_cond_msa_stride:
+                            prev_cond_msa_proj = cond_msa_proj
                         cond, h_cond_cr = fast_gate_add_and_modulate_cond(
                             cond, cond_msa_proj, cg_msa, cs_cr, csh_cr, use_triton=use_triton
                         )
 
                     h_x = h_x_precomputed if h_x_precomputed is not None else fast_modulate(x, sizes, s_cr, sh_cr)
+                    kv_seq_cond_cr = kv_seqlens_full
+                    kv_max_cond_cr = kv_maxlen_full
+                    q_cc_cr: Optional[torch.Tensor] = None
                     if skip_cond_out:
                         # Exact Cross-KV Slice: when skip_cond_out=True, Q_cc ([L, D]) is never used!
                         # Compute only K_cc, V_cc ([L, 2*D]), cutting 33.3% of DINO cross-QKV GEMM FLOPs!
@@ -1412,8 +1449,46 @@ class OptimizedLatDitRunner:
                             ).view(batch_size * L, 2, H, HD)
                         else:
                             kv_cc = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)[:, 1:]
+                    elif (
+                        (b_idx >= 1)
+                        and (cond_kv_qmc_stride > 1)
+                        and return_mid_delta
+                        and (not need_full_kv_cc)
+                        and batch_size == 1
+                        and L > 16
+                        and getattr(block, "_cond_to_q_cross_slice_w", None) is not None
+                        and getattr(block, "_cond_to_kv_cross_slice_w", None) is not None
+                    ):
+                        # ClusCa (arXiv:2509.10312) + MC-Sparse (arXiv:2610.06801) Conditioning DINO Cross-KV 2D QMC Stride:
+                        # In blocks 1..7 on Step 0 pos, compute full-L Q_cc for reverse `cond -> x` pooling,
+                        # and 2D QMC strided K_cc, V_cc (5 global tokens + every `cond_kv_qmc_stride`-th patch)
+                        # for forward `x -> cond` cross-attention, cutting 50% of cond_to_qkv_cross GEMM FLOPs
+                        # and 75% of forward x->cond FlashAttention FLOPs!
+                        q_cc_cr = F.linear(
+                            h_cond_cr,
+                            block._cond_to_q_cross_slice_w,
+                            getattr(block, "_cond_to_q_cross_slice_b", None),
+                        ).view(batch_size * L, H, HD)
+                        h_cond_cr_sub = torch.cat(
+                            [h_cond_cr[:, :5], h_cond_cr[:, 5::cond_kv_qmc_stride]], dim=1
+                        ).contiguous()
+                        L_sub_cr = h_cond_cr_sub.shape[1]
+                        kv_cc = F.linear(
+                            h_cond_cr_sub.view(batch_size * L_sub_cr, D),
+                            block._cond_to_kv_cross_slice_w,
+                            getattr(block, "_cond_to_kv_cross_slice_b", None),
+                        ).view(batch_size * L_sub_cr, 2, H, HD)
+                        c_key = f"kv_seqlens_nc_{L_sub_cr}"
+                        kv_seq_cond_cr = geom.get(c_key)
+                        if kv_seq_cond_cr is None:
+                            kv_seq_cond_cr = torch.arange(
+                                0, (batch_size + 1) * L_sub_cr, L_sub_cr, device=device, dtype=torch.int32
+                            )
+                            geom[c_key] = kv_seq_cond_cr
+                        kv_max_cond_cr = L_sub_cr
                     else:
                         qkv_cc_cr = block.cond_to_qkv_cross(h_cond_cr).view(batch_size * L, 3, H, HD)
+                        q_cc_cr = qkv_cc_cr[:, 0]
                         kv_cc = qkv_cc_cr[:, 1:]
                     if need_full_kv_cc and kv_cc_cache_out is not None:
                         kv_cc_cache_out.append(kv_cc)
@@ -1484,8 +1559,8 @@ class OptimizedLatDitRunner:
                             q_seqlens,
                             q_maxlen,
                             kv_cc,
-                            kv_seqlens_full,
-                            kv_maxlen_full,
+                            kv_seq_cond_cr,
+                            kv_max_cond_cr,
                         )
                         cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
                         if b_idx == 0 and not uncond:
@@ -1493,7 +1568,7 @@ class OptimizedLatDitRunner:
                         cr_out_for_x = cr_proj_out
 
                         h_c_out = flash_cross_attn(
-                            qkv_cc_cr[:, 0],
+                            q_cc_cr,
                             kv_seqlens_full,
                             kv_maxlen_full,
                             kv_x,
@@ -1512,7 +1587,18 @@ class OptimizedLatDitRunner:
                         cond_ffn_out = block.cond_ffn1(
                             fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)
                         )
-                        if use_interblock_fuse and (b_idx + 1 < self.cond_depth) and (cached_mid_delta is None):
+                        next_reuses_cond_msa = (
+                            use_cond_msa_stride
+                            and (b_idx + 1 > 0)
+                            and (b_idx + 1 < self.cond_depth - 1)
+                            and ((b_idx + 1) % cond_msa_stride != 0)
+                        )
+                        if (
+                            use_interblock_fuse
+                            and (b_idx + 1 < self.cond_depth)
+                            and (cached_mid_delta is None)
+                            and (not next_reuses_cond_msa)
+                        ):
                             cs_msa_nxt, csh_msa_nxt = cond_gates[b_idx + 1][0], cond_gates[b_idx + 1][1]
                             cond, h_cond_msa_precomputed = fast_gate_add_and_modulate_cond(
                                 cond, cond_ffn_out, cg_mlp, cs_msa_nxt, csh_msa_nxt, use_triton=use_triton
@@ -1892,6 +1978,8 @@ class OptimizedLatDitRunner:
         use_flow_unipc = bool(getattr(self.solver_config, "flow_unipc_bh2_integrator", True))
         use_cab_defect = bool(getattr(self.solver_config, "cab_extrapolation_defect", True))
         cab_gamma = float(getattr(self.solver_config, "cab_defect_gamma", 0.022))
+        use_stork4 = bool(getattr(self.solver_config, "stork4_rock4_finishing", True))
+        stork4_gamma = float(getattr(self.solver_config, "stork4_gamma", 0.018))
         prev_v_pos_step: Optional[torch.Tensor] = None
         prev2_v_pos_step: Optional[torch.Tensor] = None
         num_blocks = len(self.flow.blocks)
@@ -2184,6 +2272,22 @@ class OptimizedLatDitRunner:
                                 cab_defect,
                                 cab_res,
                                 value=cab_gamma * cab_phi2 * (r_cab / (1.0 + r_cab)),
+                            )
+                        if use_stork4 and stork4_gamma > 0.0 and step_idx >= 2:
+                            # STORK-4 / ROCK4 4-Stage Composition Finishing Integrator
+                            # (Tan, Wang, Bertozzi & Ryu, ICLR 2026, arXiv:2505.24210v2 / Abdulle 2002):
+                            # Non-uniform 3-point Lagrange second-derivative curvature correction!
+                            h_p2 = float(t_list[step_idx - 2]) - float(t_list[step_idx - 1])
+                            h_p1 = float(t_list[step_idx - 1]) - t_val
+                            w_c, w_p1, w_p2 = compute_stork4_rock4_weights(h_p2, h_p1, dt)
+                            rock4_curv = w_c * v + w_p1 * prev_v + w_p2 * prev2_v
+                            v_norm_r4 = (v * v).sum().clamp_min(1e-6)
+                            rock4_res = 1.0 / (1.0 + pade_eta * ((rock4_curv * rock4_curv).sum() / v_norm_r4))
+                            v_step = torch.addcmul(
+                                v_step,
+                                rock4_curv,
+                                rock4_res,
+                                value=stork4_gamma,
                             )
 
                 if (
