@@ -92,6 +92,13 @@ class SolverConfig:
     cond_dino_kv_qmc_stride: int = 4
     stork4_rock4_finishing: bool = True
     stork4_gamma: float = 0.018
+    hetcache_cond_ffn_stride: int = 2
+    postcache_rts_smoothing: bool = True
+    postcache_rts_gamma: float = 0.020
+    arex_affine_integrator: bool = True
+    arex_affine_gamma: float = 0.016
+    koopman_shallow_observer: bool = True
+    koopman_observer_gain: float = 0.035
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -260,6 +267,55 @@ def compute_stork4_rock4_weights(h_prev2: float, h_prev1: float, h_cur: float) -
     w_prev1 = -scale * (h1 + h2)
     w_prev2 = scale * h1
     return float(w_cur), float(w_prev1), float(w_prev2)
+
+
+def compute_postcache_rts_gain(
+    t_anchor_a: float,
+    t_skip_k: float,
+    t_anchor_b: float,
+    dt_skip: float,
+    dt_cur: float,
+) -> float:
+    """
+    Postdictive Rauch-Tung-Striebel (RTS) Bayesian Trajectory Smoothing Gain
+    (PoSTCache, Tsinghua Univ., arXiv:2610.25664, Oct 2026, Eqs. 8-9):
+        w_{k | a, b} = (eta_k - eta_a) / (eta_b - eta_a) = (t_a - t_k) / (t_a - t_b)
+    Propagates the future-anchor innovation r_b = u_bar_b - u_tilde_b backward to
+    retrospectively revise the skipped step's integration error with zero extra NFE.
+    """
+    span = max(1e-5, float(t_anchor_a) - float(t_anchor_b))
+    prog = max(0.0, min(span, float(t_anchor_a) - float(t_skip_k)))
+    w_kab = prog / span
+    step_ratio = min(1.25, max(0.25, float(dt_skip) / max(1e-5, float(dt_cur))))
+    return float(w_kab * step_ratio)
+
+
+def compute_arex_affine_defect(
+    t_cur: float,
+    t_next: float,
+    target_var: float = 0.7225,
+) -> Tuple[float, float]:
+    """
+    Moment-Matched Affine-Residual Exponential Integrator (AREX, arXiv:2610.03483, Oct 2026):
+    Along the linear flow-matching path X_t = t * X_0 + (1 - t) * X_1 with source N(0, I) at t=1
+    and target variance lambda_1 = target_var at t=0:
+        sigma(t)^2 = t^2 + (1 - t)^2 * lambda_1
+        F(t_next, t_cur) = sigma(t_next) / sigma(t_cur)
+        K_t = (t - (1 - t) * lambda_1) / sigma(t)^2
+    Returns (affine_step_defect, K_t) so the solver integrates the L2-optimal affine backbone
+    analytically and applies polynomial quadrature only to the non-Gaussian residual.
+    """
+    tc = min(0.999, max(0.001, float(t_cur)))
+    tn = min(0.999, max(0.0, float(t_next)))
+    dt = max(1e-5, tc - tn)
+    lam = max(0.05, float(target_var))
+    sig_c_sq = tc * tc + (1.0 - tc) * (1.0 - tc) * lam
+    sig_n_sq = tn * tn + (1.0 - tn) * (1.0 - tn) * lam
+    f_prop = math.sqrt(max(1e-8, sig_n_sq) / max(1e-8, sig_c_sq))
+    k_t = (tc - (1.0 - tc) * lam) / max(1e-8, sig_c_sq)
+    exact_shrink_rate = (1.0 - f_prop) / dt
+    affine_defect = max(-0.35, min(0.35, exact_shrink_rate - k_t))
+    return float(affine_defect), float(k_t)
 
 
 

@@ -189,11 +189,20 @@ def test_pytorch_pipeline() -> None:
             assert getattr(sol_model.runner, "_last_pos_kv_x_list", None) is not None
             assert getattr(sol_model.runner.flow.blocks[0].qk_norm._q_scale_cast, "_qk_stacked", None) is not None
             assert getattr(sol_model.runner.flow.blocks[0], "_cond_to_q_cross_slice_w", None) is not None
-            from lib.fast_sampler import compute_cab_nsr_step_ratio, compute_stork4_rock4_weights
+            from lib.fast_sampler import (
+                compute_arex_affine_defect,
+                compute_cab_nsr_step_ratio,
+                compute_postcache_rts_gain,
+                compute_stork4_rock4_weights,
+            )
             r_cab = compute_cab_nsr_step_ratio(0.95, 0.72, 0.44)
             assert 0.20 <= r_cab <= 1.5
             w_c, w_p1, w_p2 = compute_stork4_rock4_weights(0.20, 0.18, 0.15)
             assert abs(w_c + w_p1 + w_p2) < 1e-6 and w_c > 0.0 and w_p1 < 0.0 and w_p2 > 0.0
+            rts_g = compute_postcache_rts_gain(0.95, 0.72, 0.44, 0.23, 0.28)
+            assert 0.10 <= rts_g <= 1.25
+            arex_def, k_t_ax = compute_arex_affine_defect(0.72, 0.44)
+            assert -0.35 <= arex_def <= 0.35 and -2.0 <= k_t_ax <= 2.0
             # Test under bfloat16 autocast (mirrors `with stage_autocast("lat_dit", device):` in LatDitStage.run)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 g_ac = torch.Generator(device=device).manual_seed(123)

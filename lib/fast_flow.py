@@ -49,8 +49,10 @@ from lib.fast_kernels import (
 from lib.fast_sampler import (
     SolverConfig,
     build_schedule,
+    compute_arex_affine_defect,
     compute_cab_nsr_step_ratio,
     compute_flow_unipc_bh2_scale,
+    compute_postcache_rts_gain,
     compute_stork2_beta,
     compute_stork4_rock4_weights,
     get_qaoa_eval_timesteps,
@@ -841,7 +843,10 @@ class OptimizedLatDitRunner:
         use_dicache_dcta = bool(getattr(self.solver_config, "dicache_dcta_probe", True))
         pab_nc_stride = int(getattr(self.solver_config, "pab_noncond_cr_stride", 2))
         cond_msa_stride = int(getattr(self.solver_config, "hetcache_cond_msa_stride", 2))
+        cond_ffn_stride = int(getattr(self.solver_config, "hetcache_cond_ffn_stride", 2))
         cond_kv_qmc_stride = int(getattr(self.solver_config, "cond_dino_kv_qmc_stride", 4))
+        use_koopman_obs = bool(getattr(self.solver_config, "koopman_shallow_observer", True))
+        koopman_gain = float(getattr(self.solver_config, "koopman_observer_gain", 0.035))
         dmd_lambda = float(getattr(self.solver_config, "dmd_exp_decay_lambda", 0.015))
         use_1tok_collapse = bool(getattr(self.solver_config, "fused_1tok_linear_collapse", True))
         eff_mid_scale = (
@@ -1094,8 +1099,18 @@ class OptimizedLatDitRunner:
             and (not need_full_kv_cc)
             and (cached_cond_block7 is None)
         )
+        use_cond_ffn_stride = (
+            (not uncond)
+            and (cond_ffn_stride > 1)
+            and return_mid_delta
+            and (not need_full_kv_cc)
+            and (cached_cond_block7 is None)
+        )
         prev_nc_cr_out: Optional[torch.Tensor] = None
         prev_cond_msa_proj: Optional[torch.Tensor] = None
+        prev_cond_rcr_proj: Optional[torch.Tensor] = None
+        prev_cond_ffn_out: Optional[torch.Tensor] = None
+        prev_pos_kv_x: Optional[Tuple[torch.Tensor, torch.Tensor, int]] = None
 
         for b_idx, block in enumerate(self.flow.blocks):
             if can_mid_cache:
@@ -1215,7 +1230,20 @@ class OptimizedLatDitRunner:
                             and getattr(self, "_last_b0_fn_res", None) is not None
                             and self._last_b0_fn_res.shape == (N, D)
                         ):
-                            x = torch.add(x, cur_fn_res - self._last_b0_fn_res, alpha=foca_gamma)
+                            y_cur_fn = cur_fn_res - self._last_b0_fn_res
+                            x = torch.add(x, y_cur_fn, alpha=foca_gamma)
+                            if (
+                                use_koopman_obs
+                                and koopman_gain > 0.0
+                                and getattr(self, "_last_b0_fn_res_step0", None) is not None
+                                and self._last_b0_fn_res is not self._last_b0_fn_res_step0
+                                and self._last_b0_fn_res_step0.shape == (N, D)
+                            ):
+                                # Koopman-Luenberger Shallow-to-Deep Observer Innovation (ETH/MPI/MIT, arXiv:2610.10366, Oct 2026):
+                                # Feed back the shallow measurement innovation nu_k = y_cur_fn - y_prev_fn
+                                # to correct the unobserved deep CRF forecast with zero extra block evaluations!
+                                y_prev_fn = self._last_b0_fn_res - self._last_b0_fn_res_step0
+                                x = torch.add(x, y_cur_fn - y_prev_fn, alpha=koopman_gain)
                         break
                     else:
                         x_b0_msa = x
@@ -1447,6 +1475,15 @@ class OptimizedLatDitRunner:
                     kv_seq_cond_cr = kv_seqlens_full
                     kv_max_cond_cr = kv_maxlen_full
                     q_cc_cr: Optional[torch.Tensor] = None
+                    will_reuse_cond_ffn = (
+                        use_cond_ffn_stride
+                        and (b_idx > 0)
+                        and (b_idx < self.cond_depth - 1)
+                        and (b_idx % cond_ffn_stride != 0)
+                        and (prev_cond_rcr_proj is not None)
+                        and (prev_cond_ffn_out is not None)
+                        and (pos_kv_x_list is None or prev_pos_kv_x is not None)
+                    )
                     if skip_cond_out:
                         # Exact Cross-KV Slice: when skip_cond_out=True, Q_cc ([L, D]) is never used!
                         # Compute only K_cc, V_cc ([L, 2*D]), cutting 33.3% of DINO cross-QKV GEMM FLOPs!
@@ -1468,15 +1505,16 @@ class OptimizedLatDitRunner:
                         and getattr(block, "_cond_to_kv_cross_slice_w", None) is not None
                     ):
                         # ClusCa (arXiv:2509.10312) + MC-Sparse (arXiv:2610.06801) Conditioning DINO Cross-KV 2D QMC Stride:
-                        # In blocks 1..7 on Step 0 pos, compute full-L Q_cc for reverse `cond -> x` pooling,
+                        # In blocks 1..7 on Step 0 pos, compute full-L Q_cc for reverse `cond -> x` pooling (only on active FFN blocks),
                         # and 2D QMC strided K_cc, V_cc (5 global tokens + every `cond_kv_qmc_stride`-th patch)
-                        # for forward `x -> cond` cross-attention, cutting 50% of cond_to_qkv_cross GEMM FLOPs
+                        # for forward `x -> cond` cross-attention, cutting 50%-83% of cond_to_qkv_cross GEMM FLOPs
                         # and 75% of forward x->cond FlashAttention FLOPs!
-                        q_cc_cr = F.linear(
-                            h_cond_cr,
-                            block._cond_to_q_cross_slice_w,
-                            getattr(block, "_cond_to_q_cross_slice_b", None),
-                        ).view(batch_size * L, H, HD)
+                        if not will_reuse_cond_ffn:
+                            q_cc_cr = F.linear(
+                                h_cond_cr,
+                                block._cond_to_q_cross_slice_w,
+                                getattr(block, "_cond_to_q_cross_slice_b", None),
+                            ).view(batch_size * L, H, HD)
                         h_cond_cr_sub = torch.cat(
                             [h_cond_cr[:, :5], h_cond_cr[:, 5::cond_kv_qmc_stride]], dim=1
                         ).contiguous()
@@ -1520,6 +1558,49 @@ class OptimizedLatDitRunner:
                         if b_idx == 0 and not uncond:
                             self._last_b0_cr_proj = cr_proj_out
                         cr_out_for_x = cr_proj_out
+                    elif will_reuse_cond_ffn and prev_cond_rcr_proj is not None and prev_cond_ffn_out is not None:
+                        # SCR (Spectral-Guided Diffusion, arXiv:2609.29505, Aug 2026) + HetCache (arXiv:2603.24260)
+                        # + LayerCache (arXiv:2604.16492): in odd intermediate conditioning blocks (1, 3, 5),
+                        # compute exact forward `x -> cond` cross-attention for 3D voxels while reusing the
+                        # adjacent even block's reverse `cond <- x` projection and 4101-token DINO FFN residual
+                        # modulated by the current block's exact gates `cg_cr[b_idx]` and `cg_mlp[b_idx]`!
+                        q_w = getattr(block, "_to_q_cross_w", None)
+                        if q_w is not None:
+                            q_x = F.linear(h_x, q_w, getattr(block, "_to_q_cross_b", None)).view(N, H, HD)
+                        else:
+                            q_x = block.to_qkv_cross(h_x).view(N, 3, H, HD)[:, 0]
+                        if pos_kv_x_list is not None and prev_pos_kv_x is not None:
+                            pos_kv_x_list.append(prev_pos_kv_x)
+                        h_x_out = flash_cross_attn(
+                            q_x,
+                            q_seqlens,
+                            q_maxlen,
+                            kv_cc,
+                            kv_seq_cond_cr,
+                            kv_max_cond_cr,
+                        )
+                        cr_proj_out = block.to_out_cross(h_x_out.reshape(N, D))
+                        cr_out_for_x = cr_proj_out
+                        cond = fast_gate_add_cond(cond, prev_cond_rcr_proj, cg_cr)
+                        cond_ffn_out = prev_cond_ffn_out
+                        next_reuses_cond_msa = (
+                            use_cond_msa_stride
+                            and (b_idx + 1 > 0)
+                            and (b_idx + 1 < self.cond_depth - 1)
+                            and ((b_idx + 1) % cond_msa_stride != 0)
+                        )
+                        if (
+                            use_interblock_fuse
+                            and (b_idx + 1 < self.cond_depth)
+                            and (cached_mid_delta is None)
+                            and (not next_reuses_cond_msa)
+                        ):
+                            cs_msa_nxt, csh_msa_nxt = cond_gates[b_idx + 1][0], cond_gates[b_idx + 1][1]
+                            cond, h_cond_msa_precomputed = fast_gate_add_and_modulate_cond(
+                                cond, cond_ffn_out, cg_mlp, cs_msa_nxt, csh_msa_nxt, use_triton=use_triton
+                            )
+                        else:
+                            cond = fast_gate_add_cond(cond, cond_ffn_out, cg_mlp)
                     else:
                         if (
                             return_mid_delta
@@ -1560,8 +1641,11 @@ class OptimizedLatDitRunner:
                             q_seq_pos = q_seqlens
                             q_max_pos = q_maxlen
 
+                        cur_pos_kv_x = (kv_x, q_seq_pos, int(q_max_pos))
                         if pos_kv_x_list is not None:
-                            pos_kv_x_list.append((kv_x, q_seq_pos, int(q_max_pos)))
+                            pos_kv_x_list.append(cur_pos_kv_x)
+                        if use_cond_ffn_stride:
+                            prev_pos_kv_x = cur_pos_kv_x
                         h_x_out = flash_cross_attn(
                             q_x,
                             q_seqlens,
@@ -1583,9 +1667,12 @@ class OptimizedLatDitRunner:
                             q_seq_pos,
                             q_max_pos,
                         )
+                        cond_rcr_proj = block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D))
+                        if use_cond_ffn_stride:
+                            prev_cond_rcr_proj = cond_rcr_proj
                         cond, h_cond_mlp = fast_gate_add_and_modulate_cond(
                             cond,
-                            block.cond_to_out_cross(h_c_out.reshape(batch_size, L, D)),
+                            cond_rcr_proj,
                             cg_cr,
                             cs_mlp,
                             csh_mlp,
@@ -1595,6 +1682,8 @@ class OptimizedLatDitRunner:
                         cond_ffn_out = block.cond_ffn1(
                             fast_swiglu_from_packed(block.cond_ffn0(h_cond_mlp), use_triton=use_triton)
                         )
+                        if use_cond_ffn_stride:
+                            prev_cond_ffn_out = cond_ffn_out
                         next_reuses_cond_msa = (
                             use_cond_msa_stride
                             and (b_idx + 1 > 0)
@@ -1988,6 +2077,10 @@ class OptimizedLatDitRunner:
         cab_gamma = float(getattr(self.solver_config, "cab_defect_gamma", 0.022))
         use_stork4 = bool(getattr(self.solver_config, "stork4_rock4_finishing", True))
         stork4_gamma = float(getattr(self.solver_config, "stork4_gamma", 0.018))
+        use_postcache_rts = bool(getattr(self.solver_config, "postcache_rts_smoothing", True))
+        postcache_gamma = float(getattr(self.solver_config, "postcache_rts_gamma", 0.020))
+        use_arex_affine = bool(getattr(self.solver_config, "arex_affine_integrator", True))
+        arex_gamma = float(getattr(self.solver_config, "arex_affine_gamma", 0.016))
         prev_v_pos_step: Optional[torch.Tensor] = None
         prev2_v_pos_step: Optional[torch.Tensor] = None
         num_blocks = len(self.flow.blocks)
@@ -2311,6 +2404,63 @@ class OptimizedLatDitRunner:
                     # ERTACache Euler Trajectory Error-Adjustment (ICLR 2026, bytedance/ERTACache):
                     # Compensate accumulated caching truncation error on skipped conditioning steps!
                     v_step = torch.add(v_step, v_pos - prev_v_pos, alpha=erta_alpha)
+
+                if (
+                    (not apply_rk_readout)
+                    and eval_cond
+                    and use_postcache_rts
+                    and postcache_gamma > 0.0
+                    and step_idx >= 2
+                    and prev_v_pos_step is not None
+                    and prev_dt is not None
+                ):
+                    # PoSTCache Postdictive Rauch-Tung-Striebel (RTS) Trajectory Smoother
+                    # (Tsinghua Univ., arXiv:2610.25664, Oct 19 2026, Eqs. 7-9):
+                    # At future anchor b = step_idx, use the anchor innovation r_b = v_pos_b - v_pos_k
+                    # weighted by RTS smoothing gain w_{k|a,b} = (t_a - t_k) / (t_a - t_b) to
+                    # retrospectively revise the skipped interval's integration error with 0 extra NFE!
+                    rts_gain = compute_postcache_rts_gain(
+                        float(t_list[step_idx - 2]),
+                        float(t_list[step_idx - 1]),
+                        t_val,
+                        prev_dt,
+                        dt,
+                    )
+                    rts_innov = v_pos - prev_v_pos_step
+                    v_norm_rts = (v_pos * v_pos).sum().clamp_min(1e-6)
+                    rts_res = (1.0 / (1.0 + pade_eta * ((rts_innov * rts_innov).sum() / v_norm_rts))).to(
+                        dtype=v_step.dtype
+                    )
+                    v_step = torch.addcmul(
+                        v_step,
+                        rts_innov,
+                        rts_res,
+                        value=postcache_gamma * rts_gain,
+                    )
+
+                if (
+                    (not apply_rk_readout)
+                    and use_arex_affine
+                    and arex_gamma > 0.0
+                    and prev_v is not None
+                ):
+                    # AREX Moment-Matched Affine-Residual Exponential Integrator
+                    # (arXiv:2610.03483, Oct 2026, Proposition 3, Eqs. 5-9):
+                    # Analytically propagate the L2-optimal Gaussian affine backbone F(t_{n+1}, t_n)
+                    # and compensate the Euler affine discretization defect with Padé stabilization!
+                    arex_def, _ = compute_arex_affine_defect(t_val, t_next)
+                    if abs(arex_def) > 1e-6:
+                        arex_vec = xt.to(dtype=v_step.dtype) - (t_val * v).to(dtype=v_step.dtype)
+                        v_norm_ax = (v * v).sum().clamp_min(1e-6)
+                        arex_res = (1.0 / (1.0 + pade_eta * ((arex_vec * arex_vec).sum() / v_norm_ax))).to(
+                            dtype=v_step.dtype
+                        )
+                        v_step = torch.addcmul(
+                            v_step,
+                            arex_vec,
+                            arex_res,
+                            value=arex_gamma * arex_def,
+                        )
 
                 if (not apply_rk_readout) and prev_v is not None and (cd_omega > 0.0 or magnus_gamma > 0.0):
                     # Quantum Counterdiabatic Berry-Gauge Driving (Berry 2009 / Sels & Polkovnikov 2017)

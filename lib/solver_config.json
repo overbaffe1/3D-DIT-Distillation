@@ -3168,5 +3168,12 @@
   "hetcache_cond_msa_stride": 2,
   "cond_dino_kv_qmc_stride": 4,
   "stork4_rock4_finishing": true,
-  "stork4_gamma": 0.018
+  "stork4_gamma": 0.018,
+  "hetcache_cond_ffn_stride": 2,
+  "postcache_rts_smoothing": true,
+  "postcache_rts_gamma": 0.02,
+  "arex_affine_integrator": true,
+  "arex_affine_gamma": 0.016,
+  "koopman_shallow_observer": true,
+  "koopman_observer_gain": 0.035
 }
