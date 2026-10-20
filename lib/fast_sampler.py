@@ -126,6 +126,11 @@ class SolverConfig:
     tacache_vde_povd: bool = True
     tacache_povd_gamma: float = 0.016
     mcfm_strang_prox_gamma: float = 0.012
+    hierarchical_even_cond_nc_stride: bool = True
+    gp_svd_subspace_refiner: bool = True
+    slerpflow_strain_vorticity: bool = True
+    slerpflow_centripetal_gamma: float = 0.014
+    strain_suppression_alpha: float = 0.015
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -586,6 +591,78 @@ def compute_tacache_vde_mcfm_gains(
     alpha_vde = float(dot_vx) / max(1e-8, float(norm_x_sq))
     shrink_mcfm = 1.0 / (1.0 + max(0.0, float(mcfm_gamma)) * min(4.0, max(0.0, alpha_vde)) * h)
     return float(g_par), float(d_n), float(min(1.0, max(0.92, shrink_mcfm)))
+
+
+def compute_gp_svd_subspace_weight(
+    lf_cur: float,
+    hf_cur: float,
+    lf_anc: float,
+    hf_anc: float,
+    num_l1: float,
+    den_l1: float,
+    sigma_n: float = 0.12,
+) -> float:
+    """
+    SVD-Cache Subspace-Aware Feature Caching ("Forecast the Principal, Stabilize the Residual",
+    Chen et al., CVPR 2026, arXiv:2601.07396) + GP-Refiner Gaussian Process Rectified Feature Cache
+    (Shen et al., SJTU/Alibaba, arXiv:2609.05981, Sep 2026, Eqs. 8-12) + E^2-CRF (arXiv:2604.22901v2):
+      1. Decompose Block-0 probe energy into the smooth low-rank Principal Subspace fraction `p_prin`
+         and oscillatory zero-mean Gaussian Residual Subspace variance `var_res`.
+      2. Compute the Gaussian Process RBF kernel similarity `k_star` between adjacent step drifts and
+         apply Schur-complement posterior mean shrinkage `mu_gp = k_star / (k_star + sigma_n^2 * (1 + var_res))`.
+    """
+    tot_cur = max(1e-6, float(lf_cur) + float(hf_cur))
+    p_prin = max(0.0, min(1.0, float(lf_cur) / tot_cur))
+    p_res = 1.0 - p_prin
+    var_res = p_res * p_res
+    den_sq = max(1e-6, float(den_l1) * float(den_l1))
+    diff_d = float(num_l1) - float(den_l1)
+    k_star = math.exp(-min(6.0, (diff_d * diff_d) / (2.0 * den_sq)))
+    sn2 = max(1e-4, float(sigma_n) * float(sigma_n)) * (1.0 + var_res)
+    mu_gp = k_star / (k_star + sn2)
+    w = 0.90 + 0.12 * mu_gp + 0.06 * p_prin
+    return float(min(1.12, max(0.85, w)))
+
+
+def compute_slerpflow_strain_vorticity_gains(
+    t_cur: float,
+    t_next: float,
+    norm_v_sq: float,
+    dot_vx: float,
+    norm_x_sq: float,
+    dot_dv_dx: float,
+    norm_dx_sq: float,
+    slerp_gamma: float = 0.014,
+    strain_alpha: float = 0.015,
+) -> Tuple[float, float]:
+    """
+    SlerpFlow Spherical Trajectory Correction & Spurious Centrifugal Drift Cancellation
+    (Duan et al., arXiv:2607.21326, Jul 2026, Definition 4.1, Eqs. 8-10)
+    + Strain-Vorticity Jacobian Decomposition & Logarithmic Norm Damping
+    (Tao & Choi, Georgia Tech, arXiv:2605.06680v1, Apr 2026, Theorem 1, Corollary 2 & Proposition 8):
+      1. SlerpFlow Centripetal Chordal Correction:
+         Tangential squared velocity ||v_perp||_2^2 = ||v||_2^2 - <v, Z_t>^2 / ||Z_t||_2^2 induces
+         spurious centrifugal energy drift h^2 * ||v_perp||_2^2. Counteract via centripetal radial pullback:
+             c_slerp = slerp_gamma * h * ||v_perp||_2^2 / (2 * ||Z_t||_2^2 + eps)
+      2. Strain-Vorticity Separation:
+         Along secant dx_n, the antisymmetric vorticity tensor Omega satisfies <Omega dx_n, dx_n> == 0,
+         so the Rayleigh quotient mu_S = <dv_n, dx_n> / (||dx_n||_2^2 + eps) isolates the symmetric
+         strain rate S! Suppressing positive strain mu_+ = max(0, mu_S) eliminates exponential error
+         amplification exp(mu_+ * h):
+             g_strain = exp(-strain_alpha * clamp(mu_S, 0.0, 3.0) * h)
+    Returns (c_slerp, g_strain).
+    """
+    h = max(0.0, float(t_cur) - float(t_next))
+    x_sq = max(1e-6, float(norm_x_sq))
+    v_sq = max(0.0, float(norm_v_sq))
+    v_par_sq = (float(dot_vx) * float(dot_vx)) / x_sq
+    v_perp_sq = max(0.0, v_sq - v_par_sq)
+    c_slerp = max(0.0, float(slerp_gamma)) * h * min(2.0, v_perp_sq / (2.0 * x_sq))
+    dx_sq = max(1e-8, float(norm_dx_sq))
+    mu_s = float(dot_dv_dx) / dx_sq
+    mu_plus = min(3.0, max(0.0, mu_s))
+    g_strain = math.exp(-max(0.0, float(strain_alpha)) * mu_plus * h)
+    return float(min(0.05, max(0.0, c_slerp))), float(min(1.0, max(0.92, g_strain)))
 
 
 

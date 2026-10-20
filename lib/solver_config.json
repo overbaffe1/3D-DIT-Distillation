@@ -3202,5 +3202,10 @@
   "cachescope_worldcache_osi": true,
   "tacache_vde_povd": true,
   "tacache_povd_gamma": 0.016,
-  "mcfm_strang_prox_gamma": 0.012
+  "mcfm_strang_prox_gamma": 0.012,
+  "hierarchical_even_cond_nc_stride": true,
+  "gp_svd_subspace_refiner": true,
+  "slerpflow_strain_vorticity": true,
+  "slerpflow_centripetal_gamma": 0.014,
+  "strain_suppression_alpha": 0.015
 }

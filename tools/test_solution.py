@@ -246,6 +246,9 @@ def test_pytorch_pipeline() -> None:
             assert sol_model.runner.solver_config.uncond_1tok_rcr_stride == 2
             assert sol_model.runner.solver_config.cachescope_worldcache_osi is True
             assert sol_model.runner.solver_config.tacache_vde_povd is True
+            assert sol_model.runner.solver_config.hierarchical_even_cond_nc_stride is True
+            assert sol_model.runner.solver_config.gp_svd_subspace_refiner is True
+            assert sol_model.runner.solver_config.slerpflow_strain_vorticity is True
             # Test under bfloat16 autocast (mirrors `with stage_autocast("lat_dit", device):` in LatDitStage.run)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 g_ac = torch.Generator(device=device).manual_seed(123)

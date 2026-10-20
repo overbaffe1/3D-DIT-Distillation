@@ -63,6 +63,8 @@ from lib.fast_sampler import (
     compute_stork2_beta,
     compute_stork4_rock4_weights,
     compute_tacache_vde_mcfm_gains,
+    compute_gp_svd_subspace_weight,
+    compute_slerpflow_strain_vorticity_gains,
     get_qaoa_eval_timesteps,
     should_eval_cond,
     should_eval_uncond,
@@ -874,6 +876,8 @@ class OptimizedLatDitRunner:
         use_b0_carve = bool(getattr(self.solver_config, "b0_post_msa_token_carving", True))
         uncond_1tok_rcr_stride = int(getattr(self.solver_config, "uncond_1tok_rcr_stride", 2))
         use_cs_osi = bool(getattr(self.solver_config, "cachescope_worldcache_osi", True))
+        use_hier_stride = bool(getattr(self.solver_config, "hierarchical_even_cond_nc_stride", True))
+        use_gp_svd_refiner = bool(getattr(self.solver_config, "gp_svd_subspace_refiner", True))
         dmd_lambda = float(getattr(self.solver_config, "dmd_exp_decay_lambda", 0.015))
         use_1tok_collapse = bool(getattr(self.solver_config, "fused_1tok_linear_collapse", True))
         eff_mid_scale = (
@@ -1331,7 +1335,14 @@ class OptimizedLatDitRunner:
                     use_cond_msa_stride
                     and (b_idx + 1 > 0)
                     and (b_idx + 1 < self.cond_depth - 1)
-                    and ((b_idx + 1) % cond_msa_stride != 0)
+                    and (
+                        ((b_idx + 1) % cond_msa_stride != 0)
+                        or (
+                            use_hier_stride
+                            and use_cond_vox_stride
+                            and (((b_idx + 1) // cond_vox_stride) % cond_msa_stride != 0)
+                        )
+                    )
                 )
                 if (
                     use_interblock_fuse
@@ -1414,8 +1425,18 @@ class OptimizedLatDitRunner:
             will_reuse_nc_cr = (
                 use_pab_nc_cr
                 and (not block.cond)
-                and ((b_idx - self.cond_depth) % pab_nc_stride != 0)
-                and (b_idx < num_blocks - 2)
+                and (
+                    (
+                        ((b_idx - self.cond_depth) % pab_nc_stride != 0)
+                        and (b_idx < num_blocks - 2)
+                    )
+                    or (
+                        use_hier_stride
+                        and use_nc_vox_stride
+                        and (((b_idx - self.cond_depth) // nc_vox_stride) % pab_nc_stride != 0)
+                        and (b_idx < num_blocks - 1)
+                    )
+                )
                 and (prev_nc_cr_out is not None)
             )
 
@@ -1603,6 +1624,15 @@ class OptimizedLatDitRunner:
                                         dot_dy,
                                         norm_dy_prev_sq,
                                         rfc_io_ratio=num_l1 / max(1e-6, dx_l1),
+                                    )
+                                if use_gp_svd_refiner:
+                                    eff_beta = eff_beta * compute_gp_svd_subspace_weight(
+                                        lf_cur,
+                                        hf_cur,
+                                        lf_anc,
+                                        hf_anc,
+                                        num_l1,
+                                        den_l1,
                                     )
                             x = torch.add(x, crf_base, alpha=eff_mid_step_scale * (1.0 + eff_beta))
                             x = torch.add(x, crf_s0, alpha=-eff_mid_step_scale * eff_beta)
@@ -1797,7 +1827,14 @@ class OptimizedLatDitRunner:
                         use_cond_msa_stride
                         and (b_idx > 0)
                         and (b_idx < self.cond_depth - 1)
-                        and (b_idx % cond_msa_stride != 0)
+                        and (
+                            (b_idx % cond_msa_stride != 0)
+                            or (
+                                use_hier_stride
+                                and use_cond_vox_stride
+                                and ((b_idx // cond_vox_stride) % cond_msa_stride != 0)
+                            )
+                        )
                         and (prev_cond_msa_proj is not None)
                     )
                     if (
@@ -1956,13 +1993,20 @@ class OptimizedLatDitRunner:
                             use_cond_ffn_stride
                             and (b_idx > 0)
                             and (b_idx < self.cond_depth - 1)
-                            and (b_idx % cond_ffn_stride != 0)
+                            and (
+                                (b_idx % cond_ffn_stride != 0)
+                                or (
+                                    use_hier_stride
+                                    and use_cond_vox_stride
+                                    and ((b_idx // cond_vox_stride) % cond_ffn_stride != 0)
+                                )
+                            )
                             and (prev_cond_rcr_proj is not None)
                             and (prev_cond_ffn_out is not None)
                             and (pos_kv_x_list is None or prev_pos_kv_x is not None)
                         )
-                        if skip_cond_out:
-                            # Exact Cross-KV Slice: when skip_cond_out=True, Q_cc ([L, D]) is never used!
+                        if skip_cond_out or will_reuse_cond_ffn:
+                            # Exact Cross-KV Slice: when skip_cond_out=True or will_reuse_cond_ffn=True, Q_cc ([L, D]) is never used!
                             # Compute only K_cc, V_cc ([L, 2*D]), cutting 33.3% of DINO cross-QKV GEMM FLOPs!
                             kvc_w = getattr(block, "_cond_to_kv_cross_slice_w", None)
                             if kvc_w is not None:
@@ -2072,7 +2116,14 @@ class OptimizedLatDitRunner:
                                 use_cond_msa_stride
                                 and (b_idx + 1 > 0)
                                 and (b_idx + 1 < self.cond_depth - 1)
-                                and ((b_idx + 1) % cond_msa_stride != 0)
+                                and (
+                                    ((b_idx + 1) % cond_msa_stride != 0)
+                                    or (
+                                        use_hier_stride
+                                        and use_cond_vox_stride
+                                        and (((b_idx + 1) // cond_vox_stride) % cond_msa_stride != 0)
+                                    )
+                                )
                             )
                             if (
                                 use_interblock_fuse
@@ -2175,7 +2226,14 @@ class OptimizedLatDitRunner:
                                 use_cond_msa_stride
                                 and (b_idx + 1 > 0)
                                 and (b_idx + 1 < self.cond_depth - 1)
-                                and ((b_idx + 1) % cond_msa_stride != 0)
+                                and (
+                                    ((b_idx + 1) % cond_msa_stride != 0)
+                                    or (
+                                        use_hier_stride
+                                        and use_cond_vox_stride
+                                        and (((b_idx + 1) // cond_vox_stride) % cond_msa_stride != 0)
+                                    )
+                                )
                             )
                             if (
                                 use_interblock_fuse
@@ -2605,6 +2663,9 @@ class OptimizedLatDitRunner:
         use_tacache_povd = bool(getattr(self.solver_config, "tacache_vde_povd", True))
         tacache_gamma = float(getattr(self.solver_config, "tacache_povd_gamma", 0.016))
         mcfm_gamma = float(getattr(self.solver_config, "mcfm_strang_prox_gamma", 0.012))
+        use_slerp_sv = bool(getattr(self.solver_config, "slerpflow_strain_vorticity", True))
+        slerp_gamma = float(getattr(self.solver_config, "slerpflow_centripetal_gamma", 0.014))
+        strain_alpha = float(getattr(self.solver_config, "strain_suppression_alpha", 0.015))
         prev_v_pos_step: Optional[torch.Tensor] = None
         prev2_v_pos_step: Optional[torch.Tensor] = None
         prev_xt_step: Optional[torch.Tensor] = None
@@ -3042,7 +3103,8 @@ class OptimizedLatDitRunner:
                     dxt_cur = xt_f - prev_xt_step
                     has_ta = use_tacache_povd and tacache_gamma > 0.0 and prev_v is not None and prev_dt is not None
                     if has_ta:
-                        a_ta = (v - prev_v) * (1.0 / max(prev_dt, 1e-6))
+                        dv_cur = v - prev_v
+                        a_ta = dv_cur * (1.0 / max(prev_dt, 1e-6))
                         er_norms = torch.stack(
                             [
                                 (dx0_hat * dx0_hat).sum(),
@@ -3052,6 +3114,7 @@ class OptimizedLatDitRunner:
                                 (a_ta * a_ta).sum(),
                                 (v * xt_f).sum(),
                                 (xt_f * xt_f).sum(),
+                                (dv_cur * dxt_cur).sum(),
                             ]
                         ).tolist()
                     else:
@@ -3079,6 +3142,7 @@ class OptimizedLatDitRunner:
                         norm_a_sq_s = max(0.0, float(er_norms[4]))
                         dot_vx_s = float(er_norms[5])
                         norm_x_sq_s = max(1e-8, float(er_norms[6]))
+                        dot_dv_dx_s = float(er_norms[7])
                         k_ta_s = dot_av_s / n_v_sq
                         norm_r_perp_sq = max(0.0, norm_a_sq_s - k_ta_s * dot_av_s)
                         g_par_ta, d_perp_ta, shrink_mcfm = compute_tacache_vde_mcfm_gains(
@@ -3095,6 +3159,22 @@ class OptimizedLatDitRunner:
                         ta_res = 1.0 / (1.0 + pade_eta * (norm_r_perp_sq / n_v_sq))
                         v_step = v_step * (shrink_mcfm * (1.0 + tacache_gamma * (g_par_ta - 1.0)))
                         v_step = torch.add(v_step, r_perp_ta, alpha=tacache_gamma * d_perp_ta * ta_res)
+                        if use_slerp_sv and (slerp_gamma > 0.0 or strain_alpha > 0.0):
+                            c_slerp, g_strain = compute_slerpflow_strain_vorticity_gains(
+                                t_val,
+                                t_next,
+                                n_v_sq,
+                                dot_vx_s,
+                                norm_x_sq_s,
+                                dot_dv_dx_s,
+                                n_dxt_sq,
+                                slerp_gamma=slerp_gamma,
+                                strain_alpha=strain_alpha,
+                            )
+                            if g_strain < 0.999999:
+                                v_step = v_step * g_strain
+                            if c_slerp > 1e-6 and dt > 1e-6:
+                                v_step = torch.add(v_step, xt_f, alpha=c_slerp / max(dt, 1e-6))
 
                 if (not apply_rk_readout) and prev_v is not None and (cd_omega > 0.0 or magnus_gamma > 0.0):
                     # Quantum Counterdiabatic Berry-Gauge Driving (Berry 2009 / Sels & Polkovnikov 2017)
