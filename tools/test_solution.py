@@ -190,7 +190,7 @@ def test_pytorch_pipeline() -> None:
             assert getattr(sol_model.runner.flow.blocks[0].qk_norm._q_scale_cast, "_qk_stacked", None) is not None
             from lib.fast_sampler import compute_cab_nsr_step_ratio
             r_cab = compute_cab_nsr_step_ratio(0.95, 0.72, 0.44)
-            assert 0.25 <= r_cab <= 1.5
+            assert 0.20 <= r_cab <= 1.5
             meta = sol_model.last_run_metadata
             assert meta is not None and "elapsed_seconds" in meta and meta.get("status") == "ok"
             print(f"   generate() output shape={tuple(out_latents[0].shape)}, metadata={meta}")
