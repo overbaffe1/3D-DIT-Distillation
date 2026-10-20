@@ -3191,5 +3191,10 @@
   "softcache_tau": 1.35,
   "softcache_gamma": 0.18,
   "anderson_aag_acceleration": true,
-  "anderson_aag_gamma": 0.02
+  "anderson_aag_gamma": 0.02,
+  "layercache_cond_vox_stride": 2,
+  "manifold_spectral_fdc": true,
+  "manifold_beta_l": 0.25,
+  "exp_rosenbrock_integrator": true,
+  "exp_rosenbrock_gamma": 0.018
 }

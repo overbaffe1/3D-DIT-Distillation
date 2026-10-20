@@ -193,6 +193,8 @@ def test_pytorch_pipeline() -> None:
                 compute_anderson_aag_gain,
                 compute_arex_affine_defect,
                 compute_cab_nsr_step_ratio,
+                compute_exp_rosenbrock_phi_gains,
+                compute_manifold_spectral_fdc_weight,
                 compute_postcache_rts_gain,
                 compute_racer_trust_shrinkage,
                 compute_seacache_softcache_weight,
@@ -215,6 +217,10 @@ def test_pytorch_pipeline() -> None:
             assert 0.80 <= sea_w <= 1.0
             theta_aa, gain_aa = compute_anderson_aag_gain(-0.12, 0.25, 0.20)
             assert -0.85 <= theta_aa <= 0.85 and 0.0 <= gain_aa <= 1.0
+            man_w = compute_manifold_spectral_fdc_weight(0.65, 0.06, 0.09, 0.25)
+            assert 0.85 <= man_w <= 1.12
+            phi1_er, phi2_er = compute_exp_rosenbrock_phi_gains(0.72, 0.44, 0.96, 0.72)
+            assert 0.88 <= phi1_er <= 1.12 and 0.40 <= phi2_er <= 0.60
             assert sol_model.runner.solver_config.uncond_1tok_cond_ffn_stride == 2
             assert sol_model.runner.solver_config.refadapt_cond_cr_stride == 2
             assert sol_model.runner.solver_config.racer_disagreement_shrinkage is True
@@ -225,6 +231,9 @@ def test_pytorch_pipeline() -> None:
             assert sol_model.runner.solver_config.seacache_wiener_probe is True
             assert sol_model.runner.solver_config.softcache_headroom_modulation is True
             assert sol_model.runner.solver_config.anderson_aag_acceleration is True
+            assert sol_model.runner.solver_config.layercache_cond_vox_stride == 2
+            assert sol_model.runner.solver_config.manifold_spectral_fdc is True
+            assert sol_model.runner.solver_config.exp_rosenbrock_integrator is True
             # Test under bfloat16 autocast (mirrors `with stage_autocast("lat_dit", device):` in LatDitStage.run)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
                 g_ac = torch.Generator(device=device).manual_seed(123)

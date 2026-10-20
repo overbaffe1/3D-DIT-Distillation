@@ -115,6 +115,11 @@ class SolverConfig:
     softcache_gamma: float = 0.18
     anderson_aag_acceleration: bool = True
     anderson_aag_gamma: float = 0.020
+    layercache_cond_vox_stride: int = 2
+    manifold_spectral_fdc: bool = True
+    manifold_beta_l: float = 0.25
+    exp_rosenbrock_integrator: bool = True
+    exp_rosenbrock_gamma: float = 0.018
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)
@@ -425,6 +430,90 @@ def compute_anderson_aag_gain(
     cos_sq = min(1.0, max(0.0, (dot_val * dot_val) / (ng * ndg)))
     gamma_aa = math.sqrt(max(0.0, 1.0 - cos_sq))
     return float(theta_star), float(1.0 - gamma_aa)
+
+
+def compute_manifold_spectral_fdc_weight(
+    t_val: float,
+    lf_cur: float,
+    hf_cur: float,
+    lf_anc: float,
+    hf_anc: float,
+    beta_l: float = 0.25,
+    s_min: float = 0.75,
+    s_max: float = 1.25,
+    gamma_low: float = 0.80,
+    gamma_high: float = 1.50,
+) -> float:
+    """
+    ManifoldCache Constraint-Manifold Normal/Tangential Drift Envelope
+    (arXiv:2610.04510, Oct 2026, Theorems 1-2, Eqs. 2-5)
+    + SpectralCache Timestep-Aware Dynamic Scheduling (TADS, Eq. 5) &
+      Frequency-Decomposed Caching (FDC, Eqs. 8-12) (arXiv:2603.05315, Mar 2026):
+        1. TADS Cosine Bell:
+           s(t) = s_min + (s_max - s_min) * (1 - cos(2*pi*t)) / 2
+        2. FDC Dual-Band Relative Drift:
+           delta_low = lf_cur / max(eps, lf_anc),  delta_high = hf_cur / max(eps, hf_anc)
+           with asymmetric band tolerances tau_low = s(t) * gamma_low, tau_high = s(t) * gamma_high.
+        3. ManifoldCache Drift Envelope around T^* = max{t : alpha_bar_t >= 1/2} = 0.5:
+           B(beta_l; kappa_t) = beta_l^2 * kappa_t + (1 - beta_l)^2
+           normalized at kappa^* = (1 - beta_l) / beta_l.
+    Returns a bounded multiplicative modulation weight in [0.75, 1.15].
+    """
+    t = min(0.999, max(0.001, float(t_val)))
+    s_t = float(s_min) + (float(s_max) - float(s_min)) * 0.5 * (1.0 - math.cos(2.0 * math.pi * t))
+    d_low = max(0.0, float(lf_cur)) / max(1e-6, float(lf_anc))
+    d_high = max(0.0, float(hf_cur)) / max(1e-6, float(hf_anc))
+    r_low = d_low / max(0.1, s_t * float(gamma_low))
+    r_high = d_high / max(0.1, s_t * float(gamma_high))
+    fdc_gate = 1.0 / (1.0 + 0.12 * max(0.0, 0.5 * (r_low + r_high) - 1.0))
+
+    a2 = (1.0 - t) * (1.0 - t)
+    b2 = t * t
+    alpha_bar = a2 / max(1e-6, a2 + b2)
+    snr_inv = (1.0 - alpha_bar) / max(1e-4, alpha_bar)
+    beta = min(0.85, max(0.05, float(beta_l)))
+    kappa_star = (1.0 - beta) / beta
+    kappa_t = min(4.0 * kappa_star, snr_inv * (d_high / max(1e-4, d_low)))
+    b_env = beta * beta * kappa_t + (1.0 - beta) * (1.0 - beta)
+    b_ref = beta * beta * kappa_star + (1.0 - beta) * (1.0 - beta)
+    manifold_factor = math.sqrt(b_ref / max(1e-6, b_env))
+    weight = 0.85 + 0.15 * min(1.35, max(0.65, fdc_gate * manifold_factor))
+    return float(min(1.15, max(0.75, weight)))
+
+
+def compute_exp_rosenbrock_phi_gains(
+    t_cur: float,
+    t_next: float,
+    norm_dx0: float,
+    norm_dxt: float,
+    max_stiff: float = 2.5,
+) -> Tuple[float, float, float]:
+    """
+    Exponential Rosenbrock-Euler / ExpRK Stiff Propagator Functions phi_1(z), phi_2(z)
+    (Hochbruck, Ostermann & Schweitzer / Ando, Cangiotti & Sensi, arXiv:2507.04024, Feb 2026, Eqs. 3-4)
+    + DaTMe Tweedie Clean-Manifold Residual Stiffness (arXiv:2610.22370, Oct 2026, Eqs. 4-6)
+    + LayerCache / MeanFlow JVP Velocity Identity (arXiv:2604.16492, Apr 2026, Eqs. 3-7):
+        lambda_n = -min(max_stiff, ||dx0_hat||_2 / max(eps, t_cur * ||dxt||_2)) <= 0
+        z = h_n * lambda_n <= 0,  where h_n = max(0, t_cur - t_next)
+        phi_1(z) = (e^z - 1) / z        in (0, 1]
+        phi_2(z) = (e^z - 1 - z) / z^2  in (0, 1/2]
+    Uses Taylor series for |z| < 1e-4 to avoid floating-point cancellation.
+    Returns (lambda_n, phi1_z, phi2_z).
+    """
+    h = max(0.0, float(t_cur) - float(t_next))
+    t_safe = max(0.05, float(t_cur))
+    stiff_mag = min(float(max_stiff), max(0.0, float(norm_dx0)) / max(1e-6, t_safe * float(norm_dxt)))
+    lam = -stiff_mag
+    z = h * lam
+    if abs(z) < 1e-4:
+        phi1 = 1.0 + z * (0.5 + z * (1.0 / 6.0 + z / 24.0))
+        phi2 = 0.5 + z * (1.0 / 6.0 + z * (1.0 / 24.0 + z / 120.0))
+    else:
+        ez = math.exp(z)
+        phi1 = (ez - 1.0) / z
+        phi2 = (ez - 1.0 - z) / (z * z)
+    return float(lam), float(phi1), float(phi2)
+
 
 
 
