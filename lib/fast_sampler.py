@@ -81,6 +81,8 @@ class SolverConfig:
     flow_unipc_bh2_integrator: bool = True
     batched_gate_modulate_stack: bool = True
     fused_cr_carrier_accum: bool = True
+    noncond_dino_qmc_stride: int = 4
+    fused_b7_gate_ln_cond: bool = True
     # Variational QAOA parameters (gamma = t_nodes / dt_scales, beta = cfg_scales / momentum / step_channel_scales)
     qaoa_enabled: bool = True
     qaoa_t_nodes: List[float] = field(default_factory=list)

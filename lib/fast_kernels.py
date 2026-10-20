@@ -560,6 +560,8 @@ if HAS_TRITON:
         BLOCK_D: tl.constexpr,
         HAS_ACC: tl.constexpr = False,
         INIT_ACC: tl.constexpr = False,
+        APPLY_AFFINE: tl.constexpr = True,
+        STORE_X: tl.constexpr = True,
     ):
         row = tl.program_id(0)
         if row >= M:
@@ -581,7 +583,8 @@ if HAS_TRITON:
                 tl.store(ACC_ptr + base, (acc_prev + hg).to(ACC_ptr.dtype.element_ty), mask=mask)
 
         x_next = (x + hg).to(X_OUT_ptr.dtype.element_ty)
-        tl.store(X_OUT_ptr + base, x_next, mask=mask)
+        if STORE_X:
+            tl.store(X_OUT_ptr + base, x_next, mask=mask)
 
         xf = x_next.to(tl.float32)
         mean = tl.sum(xf, axis=0) / D
@@ -589,9 +592,12 @@ if HAS_TRITON:
         var = tl.sum(diff * diff, axis=0) / D
         rstd = tl.rsqrt(var + eps)
 
-        w = tl.load(W_ptr + cols, mask=mask, other=1.0).to(tl.float32)
-        b = tl.load(B_ptr + cols, mask=mask, other=0.0).to(tl.float32)
-        mod_out = (diff * rstd * w + b).to(MOD_OUT_ptr.dtype.element_ty)
+        if APPLY_AFFINE:
+            w = tl.load(W_ptr + cols, mask=mask, other=1.0).to(tl.float32)
+            b = tl.load(B_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+            mod_out = (diff * rstd * w + b).to(MOD_OUT_ptr.dtype.element_ty)
+        else:
+            mod_out = (diff * rstd).to(MOD_OUT_ptr.dtype.element_ty)
         tl.store(MOD_OUT_ptr + base, mod_out, mask=mask)
 
     @triton.jit
@@ -787,6 +793,63 @@ def fast_gate_add_and_modulate_cond(
     c_next = fast_gate_add_cond(cond, h, gate_scale)
     h_mod = fast_modulate_cond(c_next, next_scale, next_shift, eps=eps)
     return c_next, h_mod
+
+
+def fast_gate_add_and_ln_cond(
+    cond: torch.Tensor,
+    h: torch.Tensor,
+    gate_scale: torch.Tensor,
+    eps: float = 1e-6,
+    use_triton: bool = True,
+    return_cond: bool = False,
+) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
+    """
+    Fused `cond_next = cond + h * gate_scale` AND `ln_cond = LayerNorm(cond_next)`
+    for the final conditioning block (`b_idx == cond_depth - 1`), eliminating
+    writing intermediate `cond_next` to HBM when `return_cond == False`!
+    """
+    if (
+        use_triton
+        and HAS_TRITON
+        and cond.is_cuda
+        and cond.shape[0] == 1
+        and cond.is_contiguous()
+        and h.is_contiguous()
+        and cond.shape[-1] <= 2048
+    ):
+        D = cond.shape[-1]
+        M = cond.shape[1]
+        h_stride_row = 0 if h.shape[1] == 1 else D
+        g = getattr(gate_scale, "_g_2d", None)
+        if g is None:
+            g = gate_scale.view(-1)
+        ln_out = torch.empty_like(cond)
+        c_out = torch.empty_like(cond) if return_cond else ln_out
+        block_d = triton.next_power_of_2(D)
+        _fused_gate_add_ln_modulate_kernel[(M,)](
+            cond,
+            h,
+            g,
+            g,
+            g,
+            c_out,
+            ln_out,
+            ln_out,
+            M=M,
+            H_STRIDE_ROW=h_stride_row,
+            D=D,
+            eps=eps,
+            BLOCK_D=block_d,
+            HAS_ACC=False,
+            INIT_ACC=False,
+            APPLY_AFFINE=False,
+            STORE_X=return_cond,
+            num_warps=8 if block_d >= 2048 else 4,
+        )
+        return (c_out if return_cond else None), ln_out
+    c_next = fast_gate_add_cond(cond, h, gate_scale)
+    ln_out = fast_layer_norm(c_next, eps=eps)
+    return (c_next if return_cond else None), ln_out
 
 
 def fast_out_modulate_unpatchify(

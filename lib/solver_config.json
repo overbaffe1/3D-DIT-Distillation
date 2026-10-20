@@ -3157,5 +3157,7 @@
   "cayley_lie_orthogonal_step": true,
   "flow_unipc_bh2_integrator": true,
   "batched_gate_modulate_stack": true,
-  "fused_cr_carrier_accum": true
+  "fused_cr_carrier_accum": true,
+  "noncond_dino_qmc_stride": 4,
+  "fused_b7_gate_ln_cond": true
 }

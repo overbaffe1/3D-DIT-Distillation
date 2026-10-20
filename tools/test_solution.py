@@ -54,6 +54,11 @@ def test_submission_format() -> None:
         assert sc_data.get("symplectic_verlet_kick") is True
         assert sc_data.get("l1_table_rope3d") is True
         assert sc_data.get("fused_msa_to_cr_modulate") is True
+        assert sc_data.get("flow_unipc_bh2_integrator") is True
+        assert sc_data.get("batched_gate_modulate_stack") is True
+        assert sc_data.get("fused_cr_carrier_accum") is True
+        assert sc_data.get("noncond_dino_qmc_stride") == 4
+        assert sc_data.get("fused_b7_gate_ln_cond") is True
     print("   [PASS] Submission format verified.")
 
 
