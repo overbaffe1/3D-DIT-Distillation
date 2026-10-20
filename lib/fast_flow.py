@@ -854,6 +854,7 @@ class OptimizedLatDitRunner:
         tg = self._get_time_gates(t_val, device, compute_dtype, clf_token, block0_only=fast_b0_exit)
         block_gates = tg["block_gates"]
         cond_gates = tg["cond_gates"]
+        use_triton = self.solver_config.use_fused_triton_kernels
 
         if reuse_b0_msa:
             x = self._last_b0_x_after_msa
