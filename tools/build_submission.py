@@ -78,6 +78,14 @@ def build_submission_zip(
                     rel = p.relative_to(root_dir).as_posix()
                     zf.write(p, arcname=rel)
 
+        # 2b. agent_toolkit/ (portable AI-agent instructions, CI scripts, RemoteZip/chunking & ArXiv toolkit)
+        toolkit_dir = root_dir / "agent_toolkit"
+        if toolkit_dir.is_dir():
+            for p in sorted(toolkit_dir.rglob("*")):
+                if p.is_file() and "__pycache__" not in p.parts and not p.name.endswith(".pyc"):
+                    rel = p.relative_to(root_dir).as_posix()
+                    zf.write(p, arcname=rel)
+
         # 3. weights/ (only included when actual model/adapter binary weights are present,
         # so that when submitting a lightweight archive without 7.8 GB weights,
         # run_lat_dit_eval.py automatically passes organizer --lat-dit-dir to Solution.from_pretrained)
