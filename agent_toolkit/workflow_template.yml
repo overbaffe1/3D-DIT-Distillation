@@ -1,0 +1,65 @@
+# Готовый шаблон GitHub Actions для ИИ-агента (.github/workflows/fetch_baseline.yml)
+# Скопируй этот файл в `.github/workflows/fetch_baseline.yml` в новом репозитории!
+#
+# Возможности:
+#   1. Запускается при каждом пуше (или вручную через `gh workflow run`).
+#   2. Устанавливает PyTorch (CPU), Triton, RemoteZip, Safetensors и нужные пакеты.
+#   3. Перехватывает весь вывод тестов в `fetched_info/ci_run.log` через `tee`.
+#   4. Даже при падении теста (`if: always()`) коммитит `fetched_info/ci_run.log` и собранный
+#      `submission.zip` обратно в ветку с тегом `[skip ci]`, чтобы агент в песочнице
+#      прочитал полный лог через `git pull --rebase && cat fetched_info/ci_run.log`.
+
+name: Fetch Baseline and Inspect Data
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install remotezip requests numpy safetensors einops triton transformers diffusers omegaconf trimesh pandas
+
+      - name: Build and verify submission and run unit tests
+        run: |
+          set -eo pipefail
+          mkdir -p fetched_info
+          python3 tools/build_submission.py 2>&1 | tee fetched_info/ci_run.log
+          python3 tools/test_solution.py 2>&1 | tee -a fetched_info/ci_run.log
+
+      - name: Run teacher verification and solver benchmark
+        run: |
+          set -eo pipefail
+          python3 .github/scripts/verify_teacher_and_solvers.py 2>&1 | tee -a fetched_info/ci_run.log
+
+      - name: Commit and push results
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add fetched_info/ submission.zip
+          git diff --cached --quiet || (git commit -m "ci: record teacher weight stats, solver benchmark, and verified submission.zip [skip ci]" && git push origin HEAD:${GITHUB_REF_NAME})
