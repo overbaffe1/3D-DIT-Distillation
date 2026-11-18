@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
+  <title id="title">Архитектура ускоренного lat_dit</title>
+  <desc id="desc">Пять этапов от организаторского кеша до sparse-латента и оценки.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#e2dbcc" stroke-width="1" opacity="0.55"/>
+    </pattern>
+    <linearGradient id="cubeTop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#267a5c" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#28658a" stop-opacity="0.14"/>
+    </linearGradient>
+    <linearGradient id="cubeLeft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#267a5c" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#267a5c" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="cubeRight" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a86422" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#9c4f3c" stop-opacity="0.08"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a86422"/>
+    </marker>
+    <marker id="arrowMint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#267a5c"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="500" fill="#f5f1e8"/>
+  <rect width="1200" height="500" fill="url(#grid)" opacity="0.5"/>
+
+  <rect x="28" y="26" width="1144" height="448" rx="24" fill="#eee8db" stroke="#cdc5b4" opacity="0.62"/>
+  <text x="52.0" y="74.0" fill="#a86422" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" letter-spacing="2.00" opacity="1.00">КОНВЕЙЕР РЕШЕНИЯ</text>
+  <text x="1148.0" y="74.0" fill="#7b8c82" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="end" letter-spacing="0.00" opacity="1.00">хакатонский контракт: generate() не переопределяется</text>
+
+  <rect x="38.0" y="112.0" width="188.0" height="158.0" rx="16" fill="#fffdf6" stroke="#cdc5b4"/>
+  <circle cx="64.0" cy="140.0" r="15" fill="#28658a" opacity="0.92"/>
+  <text x="64.0" y="145.0" fill="#f5f1e8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="800" text-anchor="middle" letter-spacing="0.00" opacity="1.00">1</text>
+  <text x="88.0" y="146.0" fill="#17231f" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="16" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">Вход</text>
+  <text x="58.0" y="186.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">кеш вокселей</text>
+  <text x="58.0" y="210.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">DINOv3-признаки</text>
+  <text x="58.0" y="234.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00"> frozen VAE</text>
+  <line x1="228.0" y1="190" x2="266.0" y2="190" stroke="#a86422" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <rect x="272.0" y="112.0" width="188.0" height="158.0" rx="16" fill="#fffdf6" stroke="#cdc5b4"/>
+  <circle cx="298.0" cy="140.0" r="15" fill="#267a5c" opacity="0.92"/>
+  <text x="298.0" y="145.0" fill="#f5f1e8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="800" text-anchor="middle" letter-spacing="0.00" opacity="1.00">2</text>
+  <text x="322.0" y="146.0" fill="#17231f" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="16" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">Геометрия</text>
+  <text x="292.0" y="186.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">1 раз на сэмпл</text>
+  <text x="292.0" y="210.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">Hilbert-порядки</text>
+  <text x="292.0" y="234.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">RoPE + conv-индексы</text>
+  <line x1="462.0" y1="190" x2="500.0" y2="190" stroke="#a86422" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <rect x="506.0" y="112.0" width="188.0" height="158.0" rx="16" fill="#fffdf6" stroke="#cdc5b4"/>
+  <circle cx="532.0" cy="140.0" r="15" fill="#a86422" opacity="0.92"/>
+  <text x="532.0" y="145.0" fill="#f5f1e8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="800" text-anchor="middle" letter-spacing="0.00" opacity="1.00">3</text>
+  <text x="556.0" y="146.0" fill="#17231f" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="16" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">Fast DiT</text>
+  <text x="526.0" y="186.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">24 блока</text>
+  <text x="526.0" y="210.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">1-token uncond</text>
+  <text x="526.0" y="234.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">6 Triton-ядер</text>
+  <line x1="696.0" y1="190" x2="734.0" y2="190" stroke="#a86422" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <rect x="740.0" y="112.0" width="188.0" height="158.0" rx="16" fill="#fffdf6" stroke="#cdc5b4"/>
+  <circle cx="766.0" cy="140.0" r="15" fill="#9c4f3c" opacity="0.92"/>
+  <text x="766.0" y="145.0" fill="#f5f1e8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="800" text-anchor="middle" letter-spacing="0.00" opacity="1.00">4</text>
+  <text x="790.0" y="146.0" fill="#17231f" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="16" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">Солвер</text>
+  <text x="760.0" y="186.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">4 шага в конфиге</text>
+  <text x="760.0" y="210.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">граница CFG t=0.5</text>
+  <text x="760.0" y="234.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">QAOA-калибровка</text>
+  <line x1="930.0" y1="190" x2="968.0" y2="190" stroke="#a86422" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+  <rect x="974.0" y="112.0" width="188.0" height="158.0" rx="16" fill="#fffdf6" stroke="#cdc5b4"/>
+  <circle cx="1000.0" cy="140.0" r="15" fill="#28658a" opacity="0.92"/>
+  <text x="1000.0" y="145.0" fill="#f5f1e8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="800" text-anchor="middle" letter-spacing="0.00" opacity="1.00">5</text>
+  <text x="1024.0" y="146.0" fill="#17231f" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="16" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">Выход</text>
+  <text x="994.0" y="186.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">sparse-латент</text>
+  <text x="994.0" y="210.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">LPIPS 4 вида</text>
+  <text x="994.0" y="234.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">log-time factor</text>
+  <line x1="60" y1="320" x2="1140" y2="320" stroke="#cdc5b4" stroke-dasharray="6 8"/>
+  <circle cx="68" cy="368" r="6" fill="#267a5c"/>
+  <text x="84.0" y="373.0" fill="#267a5c" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="800" text-anchor="start" letter-spacing="1.20" opacity="1.00">ТОЧНО</text>
+  <text x="84.0" y="400.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">сокращение ветви без аппроксимации</text>
+  <circle cx="358" cy="368" r="6" fill="#28658a"/>
+  <text x="374.0" y="373.0" fill="#28658a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="800" text-anchor="start" letter-spacing="1.20" opacity="1.00">ОДИН РАЗ</text>
+  <text x="374.0" y="400.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">статическая геометрия вне цикла диффузии</text>
+  <circle cx="658" cy="368" r="6" fill="#a86422"/>
+  <text x="674.0" y="373.0" fill="#a86422" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="800" text-anchor="start" letter-spacing="1.20" opacity="1.00">A100</text>
+  <text x="674.0" y="400.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">AOT-проверка PTX для sm_80</text>
+  <circle cx="938" cy="368" r="6" fill="#9c4f3c"/>
+  <text x="954.0" y="373.0" fill="#9c4f3c" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="800" text-anchor="start" letter-spacing="1.20" opacity="1.00">ПРОТОКОЛ</text>
+  <text x="954.0" y="400.0" fill="#4e635a" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="14" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">CI-log + solver_experiments.json</text>
+  <text x="52.0" y="450.0" fill="#7b8c82" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">Время генератора измеряет обёртка LatDitGenerator; декодер и рендер в зачёт скорости не входят.</text>
+</svg>
