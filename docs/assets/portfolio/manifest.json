@@ -1,0 +1,31 @@
+{
+  "generated_by": "tools/build_portfolio_assets.py",
+  "sources": [
+    "fetched_info/solver_experiments.json",
+    "lib/solver_config.json"
+  ],
+  "evidence": {
+    "ref_neg_sec": 2.993171173999997,
+    "fast_neg_1token_sec": 0.29714955100001816,
+    "neg_branch_speedup": 10.072945302884923,
+    "neg_1token_max_abs_diff": 3.2186508178710938e-06,
+    "pos_max_abs_diff": 9.5367431640625e-07
+  },
+  "solver": {
+    "num_inference_steps": 4,
+    "n_guided_steps": 3,
+    "n_unguided_steps": 1
+  },
+  "assets": [
+    "architecture-dark.svg",
+    "architecture-light.svg",
+    "cover-dark.svg",
+    "cover-light.svg",
+    "one-token-dark.svg",
+    "one-token-light.svg",
+    "social-preview.png",
+    "social-preview.svg",
+    "timeline-dark.svg",
+    "timeline-light.svg"
+  ]
+}

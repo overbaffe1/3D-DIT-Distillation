@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">3D-DIT-Distillation — social preview</title>
+  <desc id="desc">Обложка для превью репозитория с ключевым замером.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#22312c" stroke-width="1" opacity="0.55"/>
+    </pattern>
+    <linearGradient id="cubeTop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a6dec0" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#7fb2cf" stop-opacity="0.14"/>
+    </linearGradient>
+    <linearGradient id="cubeLeft" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a6dec0" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#a6dec0" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="cubeRight" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e3b57d" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#d99079" stop-opacity="0.08"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#e3b57d"/>
+    </marker>
+    <marker id="arrowMint" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#a6dec0"/>
+    </marker>
+  </defs>
+  <rect width="1280" height="640" fill="#0d1513"/>
+  <rect width="1280" height="640" fill="url(#grid)" opacity="0.5"/>
+
+  <rect x="40" y="40" width="1200" height="560" rx="30" fill="#16211e" stroke="#3a4740"/>
+  <g>
+    <polygon points="850.0,226.7 1012.0,170.0 1147.0,234.8 985.0,291.5" fill="url(#cubeTop)" stroke="#a6dec0" stroke-opacity="0.60"/>
+    <polygon points="850.0,226.7 985.0,291.5 985.0,480.5 850.0,415.7" fill="url(#cubeLeft)" stroke="#a6dec0" stroke-opacity="0.42"/>
+    <polygon points="985.0,291.5 1147.0,234.8 1147.0,423.8 985.0,480.5" fill="url(#cubeRight)" stroke="#e3b57d" stroke-opacity="0.48"/>
+    <line x1="882.4" y1="215.4" x2="1017.4" y2="280.2" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="882.4" y1="228.3" x2="1120.0" y2="386.0" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="850.0" y1="264.5" x2="985.0" y2="329.3" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="914.8" y1="204.0" x2="1049.8" y2="268.8" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="914.8" y1="229.9" x2="1093.0" y2="348.2" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="850.0" y1="302.3" x2="985.0" y2="367.1" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="947.2" y1="192.7" x2="1082.2" y2="257.5" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="947.2" y1="231.6" x2="1066.0" y2="310.4" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="850.0" y1="340.1" x2="985.0" y2="404.9" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="979.6" y1="181.3" x2="1114.6" y2="246.1" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="979.6" y1="233.2" x2="1039.0" y2="272.6" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="850.0" y1="377.9" x2="985.0" y2="442.7" stroke="#a6dec0" stroke-opacity="0.18"/>
+    <circle cx="985.0" cy="291.5" r="24.3" fill="#e3b57d" opacity="0.95"/>
+    <circle cx="985.0" cy="291.5" r="41.9" fill="none" stroke="#e3b57d" stroke-opacity="0.45" stroke-width="2"/>
+    <path d="M 985.0 291.5 L 985.0 480.5" stroke="#e3b57d" stroke-dasharray="5 7" stroke-opacity="0.55"/>
+  </g>
+  <text x="86.0" y="118.0" fill="#e3b57d" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="start" letter-spacing="2.00" opacity="1.00">ХАКАТОН · LAT_DIT · PORTFOLIO CASE</text>
+  <text x="84.0" y="220.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="68" font-weight="800" text-anchor="start" letter-spacing="0.00" opacity="1.00">Один токен</text>
+  <text x="84.0" y="292.0" fill="#a6dec0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="68" font-weight="800" text-anchor="start" letter-spacing="0.00" opacity="1.00">вместо 4 101</text>
+  <text x="88.0" y="352.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="28" font-weight="600" text-anchor="start" letter-spacing="0.00" opacity="1.00">3D-DIT-Distillation</text>
+  <text x="88.0" y="396.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="22" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">Kandinsky3D · точная конденсация CFG</text>
+  <text x="88.0" y="430.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="22" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">Triton sm_80 · калиброванный поток</text>
+  <rect x="86" y="486" width="420" height="62" rx="31" fill="#1a2723" stroke="#e3b57d" stroke-opacity="0.7"/>
+  <text x="112.0" y="526.0" fill="#e3b57d" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="25" font-weight="800" text-anchor="start" letter-spacing="0.00" opacity="1.00">2,993 с → 0,297 с</text>
+  <text x="530.0" y="526.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="15" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">одна ветвь · CPU</text>
+  <text x="1200.0" y="568.0" fill="#718376" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="15" font-weight="400" text-anchor="end" letter-spacing="0.00" opacity="1.00">overbaffe1 / GitHub</text>
+
+</svg>

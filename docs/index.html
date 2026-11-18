@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0d1513">
+<meta name="description" content="Портфолио-кейс участия в хакатонском треке lat_dit: точная конденсация 4 101 zero-токенов в один, Triton sm_80 и калиброванный солвер.">
+<link rel="canonical" href="https://overbaffe1.github.io/3D-DIT-Distillation/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23a6dec0' d='M16 1 29 13 16 31 3 13z'/%3E%3Ccircle cx='16' cy='13' r='4' fill='%23e3b57d'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="portfolio.css">
+<title>Один токен вместо 4 101 — 3D-DIT-Distillation</title>
+</head>
+<body>
+<a class="skip" href="#main">К содержанию</a>
+
+<header class="site">
+  <div class="wrap mast">
+    <a class="brand" href="https://github.com/overbaffe1/3D-DIT-Distillation" aria-label="Репозиторий 3D-DIT-Distillation">
+      <svg viewBox="0 0 38 42" width="30" height="34" aria-hidden="true"><path d="m19 2 16 16-16 22L3 18z M3 18h32L19 2l-6 16 6 22 6-22-6-16"/></svg>
+      3D-DIT<span class="slash">/</span><span class="wordmark">портфолио-кейс 08</span>
+    </a>
+    <nav class="rail" aria-label="Навигация по странице">
+      <a href="#idea">Идея</a>
+      <a href="#pipeline">Конвейер</a>
+      <a href="#proof">Доказательство</a>
+      <a href="#evidence">Протокол</a>
+      <a href="#run">Запуск</a>
+      <a href="CASE_STUDY.md">Текстом</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero wrap" aria-labelledby="title">
+    <div class="frame">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/portfolio/cover-dark.svg">
+        <img src="assets/portfolio/cover-light.svg" width="1200" height="430" alt="Обложка: 3D-DIT-Distillation, один токен вместо 4 101, изометрический воксельный куб.">
+      </picture>
+    </div>
+    <div class="caption">
+      <span>Хакатонский трек <code>lat_dit</code> · Kandinsky3D / Image23D</span>
+      <span>Обложка собрана из <a href="assets/portfolio/manifest.json">manifest.json</a></span>
+    </div>
+
+    <p class="eyebrow">Участие в хакатоне / инженерный разбор</p>
+    <h1 id="title">Один токен<br><span>вместо 4 101</span></h1>
+    <p class="lede">В безусловной ветви classifier-free guidance модель обрабатывала 4 101 одинаковый zero-токен. Здесь достаточно одного: повторять одну и ту же работу тысячи раз не обязательно. Дальше — точная алгебра, шесть Triton-ядер, калиброванный солвер и честная граница между воспроизводимым замером и архивными баллами площадки.</p>
+    <div class="pill-row">
+      <span class="pill">PyTorch</span><span class="pill">Triton sm_80</span><span class="pill">Diffusion Transformer</span><span class="pill">flow matching</span><span class="pill">A100 target</span><span class="pill">GitHub Actions</span>
+    </div>
+    <p class="note">Это описание участия в хакатонском треке и работы над решением. Призовое место или итоговый ранг здесь не заявляются; все крупные цифры снабжены источником.</p>
+  </section>
+
+  <section class="section wrap" id="idea" aria-labelledby="idea-title">
+    <div class="section-head">
+      <div><p class="eyebrow">01 / Главное наблюдение</p><h2 id="idea-title">Не аппроксимация, а равенство</h2></div>
+      <span class="tag">exact structural speedup</span>
+    </div>
+    <div class="cards">
+      <div class="card"><span class="kicker">Контекст</span><strong>4 101 → 1</strong><small>токен в <code>neg_pred</code></small></div>
+      <div class="card"><span class="kicker">Одна ветвь · CPU</span><strong>2,993 → 0,297 с</strong><small>10,07× на безусловном проходе</small></div>
+      <div class="card"><span class="kicker">Ядра</span><strong>6 · sm_80</strong><small>AOT PTX в CI-log</small></div>
+      <div class="card"><span class="kicker">Солвер</span><strong>50 → 4 NFE</strong><small>3 guided + 1 unguided</small></div>
+    </div>
+    <figure class="figure">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/portfolio/one-token-dark.svg">
+        <img src="assets/portfolio/one-token-light.svg" width="1200" height="455" alt="Сравнение: 4 101 одинаковых токена и 2,993 секунды слева, один токен и 0,297 секунды справа.">
+      </picture>
+      <figcaption>Замер <strong>одной безусловной ветви</strong> на CPU-стенде с уменьшенной моделью. Это не end-to-end ускорение всей генерации и не замер A100. <a href="EVIDENCE.md">Разбор источников →</a></figcaption>
+    </figure>
+  </section>
+
+  <section class="section wrap" id="proof" aria-labelledby="proof-title">
+    <div class="section-head">
+      <div><p class="eyebrow">02 / Почему это работает</p><h2 id="proof-title">Короткое доказательство</h2></div>
+      <span class="tag">induction over 24 blocks</span>
+    </div>
+    <div class="two-col">
+      <div class="panel">
+        <h3>Все строки одинаковы</h3>
+        <p>На входе <code>cond = zeros(1, 4101, 1536)</code>, а <code>clf</code> одинаково broadcast'ится на каждый токен. До 2D RoPE все <code>Q_c</code>, <code>K_c</code>, <code>V_c</code> совпадают.</p>
+        <div class="specimen" aria-hidden="true"><span>4 101 × один и тот же вектор</span></div>
+        <div class="formula">softmax(QKᵀ) · [v, v, …, v] = v</div>
+        <p>Softmax-веса суммируются в единицу, значит любая выпуклая комбинация одинаковых value-векторов даёт тот же самый <code>v</code>. В cross-attention воксели тоже видят одинаковые ключи и значения — ответ не зависит от дублирования.</p>
+      </div>
+      <div class="panel alt">
+        <h3>Что убрали из кода</h3>
+        <ul>
+          <li><code>4101 × 4101</code> self-attention в cond-ветви;</li>
+          <li><code>N × 4101</code> cross-attention;</li>
+          <li>Q/K-проекции и <code>rope_nd</code> для нулевого контекста;</li>
+          <li>16 повторов <code>layer_norm(cond)</code> за NFE;</li>
+          <li>лишние веса сведены в <code>_cond_to_v_w</code>, <code>_to_kv_cross_w</code> и 1-token слайсы.</li>
+        </ul>
+        <details>
+          <summary>Развернуть шаги индукции</summary>
+          <ol>
+            <li>Блок 0: одинаковые <code>Q_c, K_c, V_c</code>; 2D RoPE не меняет факт равенства values.</li>
+            <li><code>x → cond</code>: достаточно одного <code>V_cc</code> и <code>to_out_cross</code>, затем broadcast gate на воксели.</li>
+            <li><code>cond → x</code>: один запрос <code>[1, 16, 96]</code> против <code>[N, 2, 16, 96]</code>.</li>
+            <li>Блоки 8–23 не меняют <code>cond</code>; кешированный LayerNorm переиспользуется.</li>
+            <li>CFG-разность <code>g_cr · (cr_pos − cr_uncond)</code> сохраняет прежний смысл.</li>
+          </ol>
+        </details>
+        <p><a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/lib/fast_flow.py">Смотреть lib/fast_flow.py ↗</a> · <a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/tools/test_solution.py">Смотреть тест ↗</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section wrap" id="pipeline" aria-labelledby="pipeline-title">
+    <div class="section-head">
+      <div><p class="eyebrow">03 / Инженерия</p><h2 id="pipeline-title">Что ещё пришлось переделать</h2></div>
+      <span class="tag">от кеша до посылки</span>
+    </div>
+    <figure class="figure">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/portfolio/architecture-dark.svg">
+        <img src="assets/portfolio/architecture-light.svg" width="1200" height="500" alt="Конвейер из пяти этапов: кеш, геометрия, fast DiT, солвер, выход и оценка.">
+      </picture>
+      <figcaption>Геометрия считается один раз на сэмпл; <code>generate()</code> организатора остаётся нетронутым, время замеряет его обёртка.</figcaption>
+    </figure>
+    <div class="steps">
+      <div class="step"><h3>Статическая геометрия</h3><p>Hilbert-порядки, <code>conv_indices</code>, RoPE-таблицы и перестановка шума вынесены из цикла на 88 NFE.</p></div>
+      <div class="step"><h3>Fused kernels</h3><p>Шесть ядер сливают QKNorm/RoPE/gather, gate/LN/AdaLN, SwiGLU и unpatchify. Для A100 есть AOT PTX <code>sm_80</code>.</p></div>
+      <div class="step"><h3>Предкаст и warmup</h3><p><code>bfloat16</code> для Linear, FP32 для <code>ffn_conv</code>, кеш gate'ов и 64-воксельный прогон до тайминга.</p></div>
+      <div class="step"><h3>Граница CFG</h3><p>Расписание делится на guided/unguided сегменты в <code>u = 0.25</code>, история многошагового метода сбрасывается.</p></div>
+      <div class="step"><h3>Калибровка</h3><p>QAOA-оптимизатор и кеши признаков подбирают траекторию; это уже приближённая часть с компромиссом по <code>rel_l2</code>.</p></div>
+      <div class="step"><h3>Посылка</h3><p>Валидатор формата, numerical equivalence, AOT-проверка и лёгкий <code>submission.zip</code> без гигабайтных весов.</p></div>
+    </div>
+    <figure class="figure">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/portfolio/timeline-dark.svg">
+        <img src="assets/portfolio/timeline-light.svg" width="1200" height="420" alt="50 шагов бейзлайна против 4 шагов настроенного солвера с границей CFG.">
+      </picture>
+      <figcaption>В CPU-абляции сравнивались 12–20 шагов; <code>4</code> — значение текущего <a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/lib/solver_config.json">solver_config.json ↗</a>, а не результат того прогона.</figcaption>
+    </figure>
+  </section>
+
+  <section class="section wrap" id="evidence" aria-labelledby="evidence-title">
+    <div class="section-head">
+      <div><p class="eyebrow">04 / Проверяемость</p><h2 id="evidence-title">Что подтверждено протоколом</h2></div>
+      <span class="tag">CPU smoke bench</span>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Проверка</th><th>Значение</th><th>Источник</th></tr></thead>
+        <tbody>
+          <tr><td><code>pos_pred</code> fast vs reference</td><td><code>max |Δ| = 9,54e-07</code>, <code>cos = 1,00000024</code></td><td><a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/fetched_info/solver_experiments.json">solver_experiments.json ↗</a></td></tr>
+          <tr><td><code>neg_pred</code> 1 token vs 4 101</td><td><code>max |Δ| = 3,22e-06</code>, <code>cos = 1,00000000</code></td><td><a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/fetched_info/ci_run.log">ci_run.log ↗</a></td></tr>
+          <tr><td>Время безусловной ветви</td><td><code>2,993 с → 0,297 с</code>, <code>10,07×</code></td><td><a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/fetched_info/ci_run.log">ci_run.log ↗</a></td></tr>
+          <tr><td>Шесть Triton-ядер</td><td>AOT PTX для <code>sm_80</code> собран без ошибок</td><td><a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/tools/test_solution.py">test_solution.py ↗</a></td></tr>
+          <tr><td>Формат сдачи</td><td>корень и <code>submission.zip</code> прошли <code>submission_format.py</code></td><td><a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/fetched_info/ci_run.log">ci_run.log ↗</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">Стенд использует уменьшенную 2-блочную модель, реальные веса <code>flow.blocks.0.*</code> и один сэмпл <code>public_test</code> на CPU. Полный LPIPS и GPU-latency здесь не измерялись.</p>
+    <details>
+      <summary>Архивные баллы площадки — почему они не в карточках выше</summary>
+      <p>В исходном README и <a href="https://github.com/overbaffe1/3D-DIT-Distillation/pull/1">PR #1</a> указаны публичные значения <code>15.5618</code>, <code>56.7039</code> и <code>116.0542</code>. Логов самой площадки в ветке нет, поэтому эти числа сохранены как историческая заявка. Внутренние метрики <code>qaoa_state.json</code> тоже не выдаются за независимый бенчмарк. Подробнее — <a href="EVIDENCE.md">EVIDENCE.md</a>.</p>
+    </details>
+  </section>
+
+  <section class="section wrap" id="run" aria-labelledby="run-title">
+    <div class="section-head">
+      <div><p class="eyebrow">05 / Потрогать</p><h2 id="run-title">Локальная проверка без GPU</h2></div>
+      <span class="tag">standard library only</span>
+    </div>
+    <div class="two-col">
+      <div>
+        <p>Оформление и схемы проверяются стандартной библиотекой Python. Для полного хакатонского eval нужны внешние веса, <code>public_test</code>, CUDA-стек и A100 — команды собраны в <a href="REPRODUCE.md">REPRODUCE.md</a>.</p>
+        <pre><code>make docs-check
+make docs-assets
+make docs-serve
+
+python3 tools/build_submission.py --output submission.zip
+python3 tools/test_solution.py</code></pre>
+        <p class="note warning"><code>make docs-serve</code> поднимает статический сервер; страница не использует JS, внешние шрифты или обращения к другому хосту.</p>
+      </div>
+      <div class="panel alt">
+        <h3>Указатель по репозиторию</h3>
+        <p><a href="CASE_STUDY.md">Кейс текстом</a> · <a href="TECHNICAL.md">Техническое устройство</a> · <a href="EVIDENCE.md">Источники цифр</a> · <a href="REPRODUCE.md">Запуск</a></p>
+        <p><a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/README.md">README на GitHub ↗</a> · <a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/solution.py">solution.py ↗</a> · <a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/score_final.py">score_final.py ↗</a></p>
+        <p><a href="assets/portfolio/social-preview.png">social-preview.png</a> · <a href="assets/portfolio/manifest.json">манифест ассетов</a></p>
+        <details>
+          <summary>Как сделаны схемы</summary>
+          <p>Все SVG и PNG генерятся <a href="https://github.com/overbaffe1/3D-DIT-Distillation/blob/main/tools/build_portfolio_assets.py">tools/build_portfolio_assets.py</a> из <code>solver_experiments.json</code> и <code>lib/solver_config.json</code>. Есть светлая и тёмная версии для каждой схемы, а также <code>prefers-reduced-motion</code>-безопасная статика.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="section wrap" id="about" aria-labelledby="about-title">
+    <div class="section-head">
+      <div><p class="eyebrow">06 / Контекст</p><h2 id="about-title">Место в портфолио</h2></div>
+      <span class="tag">работа 08</span>
+    </div>
+    <p class="lede">Визуальный язык взят из мастерской <a href="https://github.com/overbaffe1/gitEdit">gitEdit</a>: собственные SVG, светлая/тёмная обложка, раскрывающиеся доказательства и ссылка с каждого утверждения на исходник. Ассеты не копируются — они собраны из данных этого репозитория.</p>
+    <div class="pill-row">
+      <a class="pill" href="https://github.com/overbaffe1/overbaffe1#08--один-токен-вместо-4-101">Альбом · работа 08</a>
+      <a class="pill" href="https://github.com/overbaffe1/gitEdit">gitEdit</a>
+      <a class="pill" href="https://github.com/overbaffe1/3D-DIT-Distillation/pull/1">PR #1 · исходная сдача</a>
+      <a class="pill" href="https://github.com/overbaffe1?tab=repositories">Все репозитории</a>
+    </div>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <div>3D-DIT-Distillation · статическая витрина кейса · формы и цифры взяты из зафиксированных в Git артефактов репозитория.</div>
+    <div class="links">
+      <a href="https://github.com/overbaffe1/3D-DIT-Distillation">GitHub</a>
+      <a href="EVIDENCE.md">Протоколы</a>
+      <a href="https://rawcdn.githack.com/overbaffe1/3D-DIT-Distillation/main/docs/index.html">Открыть через CDN</a>
+    </div>
+  </div>
+</footer>
+</body>
+</html>
