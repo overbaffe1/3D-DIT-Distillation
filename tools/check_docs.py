@@ -105,6 +105,46 @@ def check_path(target: str, source: Path, errors: list[str], seen: set[Path]) ->
         errors.append(f"{source.relative_to(ROOT)}: missing link target: {target} → {path.relative_to(ROOT)}")
 
 
+SVG_NS = "{http://www.w3.org/2000/svg}"
+
+
+def check_svg_layout(errors: list[str]) -> None:
+    """Catch the two visual regressions that motivated the second portfolio PR."""
+    for name in ("cover-light.svg", "cover-dark.svg"):
+        path = ASSETS / name
+        root = ElementTree.parse(path).getroot()
+        rects = root.findall(f".//{SVG_NS}rect")
+        panels = [r for r in rects if r.get("x") == "34" and r.get("y") == "30"]
+        if not panels:
+            errors.append(f"{name}: cover panel rect not found")
+            continue
+        panel = panels[0]
+        panel_bottom = float(panel.get("y", "0")) + float(panel.get("height", "0"))
+        for rect in rects:
+            if rect.get("rx") != "14":
+                continue
+            chip_bottom = float(rect.get("y", "0")) + float(rect.get("height", "0"))
+            if chip_bottom > panel_bottom - 8:
+                errors.append(f"{name}: chip card crosses the panel border ({chip_bottom:.0f} vs {panel_bottom:.0f})")
+
+    for name in ("timeline-light.svg", "timeline-dark.svg"):
+        path = ASSETS / name
+        root = ElementTree.parse(path).getroot()
+        horizontal = [
+            line for line in root.findall(f".//{SVG_NS}line")
+            if line.get("y1") == line.get("y2") and float(line.get("y1", "0")) > 250
+        ]
+        left_labels = [
+            text for text in root.findall(f".//{SVG_NS}text")
+            if float(text.get("x", "0")) < 300 and 230 < float(text.get("y", "0")) < 310
+        ]
+        for line in horizontal:
+            y = float(line.get("y1", "0"))
+            for text in left_labels:
+                if abs(y - float(text.get("y", "0"))) < 18:
+                    errors.append(f"{name}: timeline line at y={y:.0f} overlaps label at y={float(text.get('y', '0')):.0f}")
+
+
 def main() -> int:
     errors: list[str] = []
     seen: set[Path] = set()
@@ -136,6 +176,11 @@ def main() -> int:
         except ElementTree.ParseError as exc:
             errors.append(f"{svg.relative_to(ROOT)}: malformed SVG XML: {exc}")
 
+    try:
+        check_svg_layout(errors)
+    except ElementTree.ParseError as exc:
+        errors.append(f"SVG layout check could not parse assets: {exc}")
+
     manifest_path = ASSETS / "manifest.json"
     if not manifest_path.is_file():
         errors.append("docs/assets/portfolio/manifest.json is missing")
@@ -162,7 +207,7 @@ def main() -> int:
             print("  -", err)
         return 1
 
-    print(f"docs-check OK: {len(seen)} local targets, {len(SVG_FILES)} SVGs, {len(HTML_FILES)} HTML pages")
+    print(f"docs-check OK: {len(seen)} local targets, {len(SVG_FILES)} SVGs, {len(HTML_FILES)} HTML pages, layout checks passed")
     return 0
 
 

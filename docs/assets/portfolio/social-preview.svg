@@ -34,9 +34,10 @@
     <polygon points="850.0,226.7 985.0,291.5 985.0,480.5 850.0,415.7" fill="url(#cubeLeft)" stroke="#a6dec0" stroke-opacity="0.42"/>
     <polygon points="985.0,291.5 1147.0,234.8 1147.0,423.8 985.0,480.5" fill="url(#cubeRight)" stroke="#e3b57d" stroke-opacity="0.48"/>
     <line x1="882.4" y1="215.4" x2="1017.4" y2="280.2" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="882.4" y1="228.3" x2="1120.0" y2="386.0" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="850.0" y1="264.5" x2="985.0" y2="329.3" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="914.8" y1="204.0" x2="1049.8" y2="268.8" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="914.8" y1="229.9" x2="1093.0" y2="348.2" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="850.0" y1="302.3" x2="985.0" y2="367.1" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="947.2" y1="192.7" x2="1082.2" y2="257.5" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="947.2" y1="231.6" x2="1066.0" y2="310.4" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="850.0" y1="340.1" x2="985.0" y2="404.9" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="979.6" y1="181.3" x2="1114.6" y2="246.1" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="979.6" y1="233.2" x2="1039.0" y2="272.6" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="850.0" y1="377.9" x2="985.0" y2="442.7" stroke="#a6dec0" stroke-opacity="0.18"/>
-    <circle cx="985.0" cy="291.5" r="24.3" fill="#e3b57d" opacity="0.95"/>
-    <circle cx="985.0" cy="291.5" r="41.9" fill="none" stroke="#e3b57d" stroke-opacity="0.45" stroke-width="2"/>
-    <path d="M 985.0 291.5 L 985.0 480.5" stroke="#e3b57d" stroke-dasharray="5 7" stroke-opacity="0.55"/>
+    <path d="M 998.5 230.8 L 985.0 480.5" stroke="#e3b57d" stroke-dasharray="5 7" stroke-opacity="0.45"/>
+    <circle cx="998.5" cy="230.8" r="41.9" fill="none" stroke="#e3b57d" stroke-opacity="0.45" stroke-width="2"/>
+    <circle cx="998.5" cy="230.8" r="24.3" fill="#e3b57d" stroke="#0d1513" stroke-width="3"/>
+    <text x="998.5" y="240.2" fill="#0d1513" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="27" font-weight="800" text-anchor="middle" letter-spacing="0.00" opacity="1.00">1</text>
   </g>
   <text x="86.0" y="118.0" fill="#e3b57d" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="18" font-weight="700" text-anchor="start" letter-spacing="2.00" opacity="1.00">ХАКАТОН · LAT_DIT · PORTFOLIO CASE</text>
   <text x="84.0" y="220.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="68" font-weight="800" text-anchor="start" letter-spacing="0.00" opacity="1.00">Один токен</text>

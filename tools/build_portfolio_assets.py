@@ -148,8 +148,8 @@ def chip(x: float, y: float, w: float, h: float, label: str, value: str, p: dict
   <g>
     <rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="14" fill="{p['panel']}" stroke="{p['line']}"/>
     <rect x="{x:.1f}" y="{y:.1f}" width="5" height="{h:.1f}" rx="2.5" fill="{accent}"/>
-    {txt(x + 18, y + 25, label, size=12, fill=p['dim'], weight=600, spacing=1.2)}
-    {txt(x + 18, y + 54, value, size=22, fill=p['ink'], weight=700)}
+    {txt(x + 18, y + 24, label, size=12, fill=p['dim'], weight=600, spacing=1.2)}
+    {txt(x + 18, y + 51, value, size=21, fill=p['ink'], weight=700)}
   </g>""".strip()
 
 
@@ -173,38 +173,41 @@ def cube(p: dict[str, str], x: float, y: float, scale: float = 1.0) -> str:
         lines.append(f'<line x1="{x:.1f}" y1="{y + (42 + 28 * i) * scale:.1f}" '
                      f'x2="{x + 100 * scale:.1f}" y2="{y + (90 + 28 * i) * scale:.1f}" '
                      f'stroke="{p["mint"]}" stroke-opacity="0.18"/>')
+    cx = x + 110 * scale
+    cy = y + 45 * scale
     return f"""
   <g>
     <polygon points="{top}" fill="url(#cubeTop)" stroke="{p['mint']}" stroke-opacity="0.60"/>
     <polygon points="{left}" fill="url(#cubeLeft)" stroke="{p['mint']}" stroke-opacity="0.42"/>
     <polygon points="{right}" fill="url(#cubeRight)" stroke="{p['brass']}" stroke-opacity="0.48"/>
     {''.join(lines)}
-    <circle cx="{x + 100 * scale:.1f}" cy="{y + 90 * scale:.1f}" r="{18 * scale:.1f}" fill="{p['brass']}" opacity="0.95"/>
-    <circle cx="{x + 100 * scale:.1f}" cy="{y + 90 * scale:.1f}" r="{31 * scale:.1f}" fill="none" stroke="{p['brass']}" stroke-opacity="0.45" stroke-width="2"/>
-    <path d="M {x + 100 * scale:.1f} {y + 90 * scale:.1f} L {x + 100 * scale:.1f} {y + 230 * scale:.1f}" stroke="{p['brass']}" stroke-dasharray="5 7" stroke-opacity="0.55"/>
+    <path d="M {cx:.1f} {cy:.1f} L {x + 100 * scale:.1f} {y + 230 * scale:.1f}" stroke="{p['brass']}" stroke-dasharray="5 7" stroke-opacity="0.45"/>
+    <circle cx="{cx:.1f}" cy="{cy:.1f}" r="{31 * scale:.1f}" fill="none" stroke="{p['brass']}" stroke-opacity="0.45" stroke-width="2"/>
+    <circle cx="{cx:.1f}" cy="{cy:.1f}" r="{18 * scale:.1f}" fill="{p['brass']}" stroke="{p['bg']}" stroke-width="3"/>
+    {txt(cx, cy + 7 * scale, '1', size=int(20 * scale), fill=p['bg'], weight=800, anchor='middle')}
   </g>""".strip()
 
 
 def cover(p: dict[str, str], variant: str) -> str:
-    w, h = 1200, 430
+    w, h = 1200, 470
     body = f"""
   <rect x="34" y="30" width="{w - 68}" height="{h - 60}" rx="26" fill="{p['panel']}" stroke="{p['line']}" opacity="0.92"/>
-  {cube(p, 805, 95, 1.02)}
+  {cube(p, 805, 88, 1.02)}
   {txt(72, 86, 'PORTFOLIO CASE  /  08', size=13, fill=p['brass'], weight=700, spacing=2.4)}
   {txt(72, 150, '3D-DIT', size=64, fill=p['ink'], weight=800, spacing=-1.5)}
   {txt(72, 210, 'DISTILLATION', size=43, fill=p['mint'], weight=700, spacing=1.0)}
-  {txt(74, 258, 'Хакатонский трек lat_dit · Kandinsky3D', size=21, fill=p['dim'])}
-  {txt(74, 292, 'Один токен вместо 4 101 в безусловной ветви CFG', size=19, fill=p['ink'], weight=600)}
-  {txt(74, 322, 'Точная алгебра, Triton sm_80 и калиброванный поток', size=16, fill=p['muted'])}
+  {txt(74, 256, 'Хакатонский трек lat_dit · Kandinsky3D', size=21, fill=p['dim'])}
+  {txt(74, 288, 'Один токен вместо 4 101 в безусловной ветви CFG', size=19, fill=p['ink'], weight=600)}
+  {txt(74, 314, 'Точная алгебра, Triton sm_80 и калиброванный поток', size=16, fill=p['muted'])}
   <g>
-    <rect x="804" y="334" width="306" height="46" rx="23" fill="{p['panel2']}" stroke="{p['brass']}" stroke-opacity="0.65"/>
-    {txt(830, 363, '4 101  →  1', size=23, fill=p['brass'], weight=800, spacing=1.0)}
-    {txt(982, 363, 'без аппроксимации', size=13, fill=p['dim'])}
+    <rect x="804" y="330" width="306" height="62" rx="31" fill="{p['panel2']}" stroke="{p['brass']}" stroke-opacity="0.65"/>
+    {txt(957, 360, '4 101  →  1', size=23, fill=p['brass'], weight=800, spacing=1.0, anchor='middle')}
+    {txt(957, 383, 'без аппроксимации', size=13, fill=p['dim'], anchor='middle')}
   </g>
-  {chip(70, 344, 164, 58, 'CFG BRANCH', f'{comma(REF_NEG)} → {comma(FAST_NEG)} с', p, p['mint'])}
-  {chip(246, 344, 150, 58, 'KERNELS', '6 · sm_80', p, p['blue'])}
-  {chip(408, 344, 150, 58, 'TUNED SOLVER', f'50 → {STEPS} NFE', p, p['brass'])}
-  {chip(570, 344, 176, 58, 'STACK', 'PyTorch · Triton', p, p['rose'])}
+  {chip(70, 330, 164, 62, 'CFG BRANCH', f'{comma(REF_NEG)} → {comma(FAST_NEG)} с', p, p['mint'])}
+  {chip(246, 330, 150, 62, 'KERNELS', '6 · sm_80', p, p['blue'])}
+  {chip(408, 330, 150, 62, 'TUNED SOLVER', f'50 → {STEPS} NFE', p, p['brass'])}
+  {chip(570, 330, 176, 62, 'STACK', 'PyTorch · Triton', p, p['rose'])}
   {txt(w - 72, 86, 'CASE STUDY', size=12, fill=p['muted'], weight=700, spacing=2.0, anchor='end')}
 """
     return doc(w, h, p, "3D-DIT-Distillation — обложка портфолио-кейса", "Изометрический воксельный куб и ключевые показатели хакатонского решения.", body)
@@ -299,30 +302,30 @@ def timeline(p: dict[str, str], variant: str) -> str:
     ticks = []
     for i in range(51):
         x = x0 + (x1 - x0) * i / 50
-        ticks.append(f'<line x1="{x:.1f}" y1="142" x2="{x:.1f}" y2="154" stroke="{p["mint"]}" stroke-opacity="0.55"/>')
+        ticks.append(f'<line x1="{x:.1f}" y1="160" x2="{x:.1f}" y2="172" stroke="{p["mint"]}" stroke-opacity="0.55"/>')
     student_ticks = []
     for i in range(STEPS + 1):
         x = x0 + (x1 - x0) * i / STEPS
-        student_ticks.append(f'<line x1="{x:.1f}" y1="276" x2="{x:.1f}" y2="300" stroke="{p["brass"]}" stroke-width="4"/>')
-        student_ticks.append(f'<circle cx="{x:.1f}" cy="276" r="7" fill="{p["brass"]}"/>')
+        student_ticks.append(f'<line x1="{x:.1f}" y1="286" x2="{x:.1f}" y2="310" stroke="{p["brass"]}" stroke-width="4"/>')
+        student_ticks.append(f'<circle cx="{x:.1f}" cy="292" r="7" fill="{p["brass"]}"/>')
     body = f"""
   <rect x="28" y="26" width="1144" height="368" rx="24" fill="{p['panel']}" stroke="{p['line']}"/>
   {txt(54, 70, 'ТРАЕКТОРИЯ ПОТОКА', size=13, fill=p['brass'], weight=700, spacing=2.0)}
   {txt(1146, 70, 't = 1 → 0 · CFG активен до t = 0.5', size=13, fill=p['muted'], anchor='end')}
-  {txt(54, 120, 'Бейзлайн', size=17, fill=p['ink'], weight=700)}
-  {txt(54, 146, '50 шагов Euler + CFG', size=14, fill=p['dim'])}
-  <line x1="{x0}" y1="148" x2="{x1}" y2="148" stroke="{p['mint']}" stroke-width="3" opacity="0.65"/>
+  {txt(54, 112, 'Бейзлайн', size=17, fill=p['ink'], weight=700)}
+  {txt(54, 138, '50 шагов Euler + CFG', size=14, fill=p['dim'])}
+  <line x1="{x0}" y1="166" x2="{x1}" y2="166" stroke="{p['mint']}" stroke-width="3" opacity="0.65"/>
   {''.join(ticks)}
-  {txt(54, 252, f'Настроенный солвер', size=17, fill=p['ink'], weight=700)}
-  {txt(54, 278, f'{STEPS} шага · {GUIDED} guided + {UNGUIDED} unguided', size=14, fill=p['dim'])}
-  <line x1="{x0}" y1="276" x2="{x1}" y2="276" stroke="{p['line']}" stroke-width="3"/>
-  <line x1="{x0}" y1="276" x2="{boundary:.1f}" y2="276" stroke="{p['blue']}" stroke-width="5"/>
-  <line x1="{boundary:.1f}" y1="276" x2="{x1}" y2="276" stroke="{p['rose']}" stroke-width="5"/>
+  {txt(54, 238, f'Настроенный солвер', size=17, fill=p['ink'], weight=700)}
+  {txt(54, 264, f'{STEPS} шага · {GUIDED} guided + {UNGUIDED} unguided', size=14, fill=p['dim'])}
+  <line x1="{x0}" y1="292" x2="{x1}" y2="292" stroke="{p['line']}" stroke-width="3"/>
+  <line x1="{x0}" y1="292" x2="{boundary:.1f}" y2="292" stroke="{p['blue']}" stroke-width="5"/>
+  <line x1="{boundary:.1f}" y1="292" x2="{x1}" y2="292" stroke="{p['rose']}" stroke-width="5"/>
   {''.join(student_ticks)}
-  <line x1="{boundary:.1f}" y1="102" x2="{boundary:.1f}" y2="340" stroke="{p['brass']}" stroke-dasharray="7 8" stroke-opacity="0.72"/>
+  <line x1="{boundary:.1f}" y1="102" x2="{boundary:.1f}" y2="352" stroke="{p['brass']}" stroke-dasharray="7 8" stroke-opacity="0.72"/>
   {txt(boundary + 10, 116, 'ГРАНИЦА CFG · t = 0.5', size=12, fill=p['brass'], weight=700, spacing=1.0)}
-  {txt(x0, 334, 'guided', size=13, fill=p['blue'], weight=700)}
-  {txt(x1, 334, 'unguided', size=13, fill=p['rose'], weight=700, anchor='end')}
+  {txt(x0, 344, 'guided', size=13, fill=p['blue'], weight=700)}
+  {txt(x1, 344, 'unguided', size=13, fill=p['rose'], weight=700, anchor='end')}
   {txt(x0, 376, f'В CPU-абляции сравнивались 12–20 шагов; {STEPS} — значение текущего lib/solver_config.json, а не результат того прогона.', size=12, fill=p['muted'])}
 """
     return doc(w, h, p, "Расписание солвера", "Сравнение 50-шагового бейзлайна и настроенного расписания с границей CFG.", body)
@@ -445,10 +448,19 @@ stroke '{p['brass']}'
 stroke-width 1
 line 986,248 1086,206
 line 1022,236 1092,212
+stroke '{p['brass']}'
+stroke-width 2
+fill none
+circle 981,215 1017,215
 fill '{p['brass']}'
+stroke '{p['bg']}'
+stroke-width 3
+circle 981,215 1001,215
+fill '{p['bg']}'
 stroke none
-circle 950,260 974,260
-circle 950,260 986,260
+font DejaVu-Sans-Bold
+font-size 24
+text 974,223 '1'
 fill '{p['brass']}'
 font DejaVu-Sans-Bold
 font-size 18
