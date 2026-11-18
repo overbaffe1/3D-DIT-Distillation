@@ -9,7 +9,7 @@
 ## 0. Что можно проверить сразу
 
 ```bash
-make docs-check     # ссылки, XML/SVG, локальные ассеты HTML, отсутствие localhost в разметке
+make docs-check     # ссылки, XML/SVG, локальные ассеты HTML, раскладка обложки/timeline, без localhost
 make docs-assets    # пересобрать SVG + social-preview.png из JSON-протоколов
 make docs-serve     # статическая витрина на 0.0.0.0:4173
 ```

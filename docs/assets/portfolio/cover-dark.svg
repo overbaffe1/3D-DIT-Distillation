@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="470" viewBox="0 0 1200 470" role="img" aria-labelledby="title desc">
   <title id="title">3D-DIT-Distillation — обложка портфолио-кейса</title>
   <desc id="desc">Изометрический воксельный куб и ключевые показатели хакатонского решения.</desc>
   <defs>
@@ -25,53 +25,54 @@
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#a6dec0"/>
     </marker>
   </defs>
-  <rect width="1200" height="430" fill="#0d1513"/>
-  <rect width="1200" height="430" fill="url(#grid)" opacity="0.5"/>
+  <rect width="1200" height="470" fill="#0d1513"/>
+  <rect width="1200" height="470" fill="url(#grid)" opacity="0.5"/>
 
-  <rect x="34" y="30" width="1132" height="370" rx="26" fill="#16211e" stroke="#3a4740" opacity="0.92"/>
+  <rect x="34" y="30" width="1132" height="410" rx="26" fill="#16211e" stroke="#3a4740" opacity="0.92"/>
   <g>
-    <polygon points="805.0,137.8 927.4,95.0 1029.4,144.0 907.0,186.8" fill="url(#cubeTop)" stroke="#a6dec0" stroke-opacity="0.60"/>
-    <polygon points="805.0,137.8 907.0,186.8 907.0,329.6 805.0,280.6" fill="url(#cubeLeft)" stroke="#a6dec0" stroke-opacity="0.42"/>
-    <polygon points="907.0,186.8 1029.4,144.0 1029.4,286.8 907.0,329.6" fill="url(#cubeRight)" stroke="#e3b57d" stroke-opacity="0.48"/>
-    <line x1="829.5" y1="129.3" x2="931.5" y2="178.2" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="829.5" y1="139.1" x2="1009.0" y2="258.2" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="805.0" y1="166.4" x2="907.0" y2="215.4" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="854.0" y1="120.7" x2="956.0" y2="169.7" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="854.0" y1="140.3" x2="988.6" y2="229.6" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="805.0" y1="195.0" x2="907.0" y2="243.9" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="878.4" y1="112.1" x2="980.4" y2="161.1" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="878.4" y1="141.5" x2="968.2" y2="201.1" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="805.0" y1="223.5" x2="907.0" y2="272.5" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="902.9" y1="103.6" x2="1004.9" y2="152.5" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="902.9" y1="142.7" x2="947.8" y2="172.5" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="805.0" y1="252.1" x2="907.0" y2="301.0" stroke="#a6dec0" stroke-opacity="0.18"/>
-    <circle cx="907.0" cy="186.8" r="18.4" fill="#e3b57d" opacity="0.95"/>
-    <circle cx="907.0" cy="186.8" r="31.6" fill="none" stroke="#e3b57d" stroke-opacity="0.45" stroke-width="2"/>
-    <path d="M 907.0 186.8 L 907.0 329.6" stroke="#e3b57d" stroke-dasharray="5 7" stroke-opacity="0.55"/>
+    <polygon points="805.0,130.8 927.4,88.0 1029.4,137.0 907.0,179.8" fill="url(#cubeTop)" stroke="#a6dec0" stroke-opacity="0.60"/>
+    <polygon points="805.0,130.8 907.0,179.8 907.0,322.6 805.0,273.6" fill="url(#cubeLeft)" stroke="#a6dec0" stroke-opacity="0.42"/>
+    <polygon points="907.0,179.8 1029.4,137.0 1029.4,279.8 907.0,322.6" fill="url(#cubeRight)" stroke="#e3b57d" stroke-opacity="0.48"/>
+    <line x1="829.5" y1="122.3" x2="931.5" y2="171.2" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="829.5" y1="132.1" x2="1009.0" y2="251.2" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="805.0" y1="159.4" x2="907.0" y2="208.4" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="854.0" y1="113.7" x2="956.0" y2="162.7" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="854.0" y1="133.3" x2="988.6" y2="222.6" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="805.0" y1="188.0" x2="907.0" y2="236.9" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="878.4" y1="105.1" x2="980.4" y2="154.1" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="878.4" y1="134.5" x2="968.2" y2="194.1" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="805.0" y1="216.5" x2="907.0" y2="265.5" stroke="#a6dec0" stroke-opacity="0.18"/><line x1="902.9" y1="96.6" x2="1004.9" y2="145.5" stroke="#a6dec0" stroke-opacity="0.22"/><line x1="902.9" y1="135.7" x2="947.8" y2="165.5" stroke="#e3b57d" stroke-opacity="0.20"/><line x1="805.0" y1="245.1" x2="907.0" y2="294.0" stroke="#a6dec0" stroke-opacity="0.18"/>
+    <path d="M 917.2 133.9 L 907.0 322.6" stroke="#e3b57d" stroke-dasharray="5 7" stroke-opacity="0.45"/>
+    <circle cx="917.2" cy="133.9" r="31.6" fill="none" stroke="#e3b57d" stroke-opacity="0.45" stroke-width="2"/>
+    <circle cx="917.2" cy="133.9" r="18.4" fill="#e3b57d" stroke="#0d1513" stroke-width="3"/>
+    <text x="917.2" y="141.0" fill="#0d1513" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="20" font-weight="800" text-anchor="middle" letter-spacing="0.00" opacity="1.00">1</text>
   </g>
   <text x="72.0" y="86.0" fill="#e3b57d" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="700" text-anchor="start" letter-spacing="2.40" opacity="1.00">PORTFOLIO CASE  /  08</text>
   <text x="72.0" y="150.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="64" font-weight="800" text-anchor="start" letter-spacing="-1.50" opacity="1.00">3D-DIT</text>
   <text x="72.0" y="210.0" fill="#a6dec0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="43" font-weight="700" text-anchor="start" letter-spacing="1.00" opacity="1.00">DISTILLATION</text>
-  <text x="74.0" y="258.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="21" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">Хакатонский трек lat_dit · Kandinsky3D</text>
-  <text x="74.0" y="292.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="19" font-weight="600" text-anchor="start" letter-spacing="0.00" opacity="1.00">Один токен вместо 4 101 в безусловной ветви CFG</text>
-  <text x="74.0" y="322.0" fill="#718376" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="16" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">Точная алгебра, Triton sm_80 и калиброванный поток</text>
+  <text x="74.0" y="256.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="21" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">Хакатонский трек lat_dit · Kandinsky3D</text>
+  <text x="74.0" y="288.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="19" font-weight="600" text-anchor="start" letter-spacing="0.00" opacity="1.00">Один токен вместо 4 101 в безусловной ветви CFG</text>
+  <text x="74.0" y="314.0" fill="#718376" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="16" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">Точная алгебра, Triton sm_80 и калиброванный поток</text>
   <g>
-    <rect x="804" y="334" width="306" height="46" rx="23" fill="#1a2723" stroke="#e3b57d" stroke-opacity="0.65"/>
-    <text x="830.0" y="363.0" fill="#e3b57d" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="23" font-weight="800" text-anchor="start" letter-spacing="1.00" opacity="1.00">4 101  →  1</text>
-    <text x="982.0" y="363.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="start" letter-spacing="0.00" opacity="1.00">без аппроксимации</text>
+    <rect x="804" y="330" width="306" height="62" rx="31" fill="#1a2723" stroke="#e3b57d" stroke-opacity="0.65"/>
+    <text x="957.0" y="360.0" fill="#e3b57d" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="23" font-weight="800" text-anchor="middle" letter-spacing="1.00" opacity="1.00">4 101  →  1</text>
+    <text x="957.0" y="383.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="13" font-weight="400" text-anchor="middle" letter-spacing="0.00" opacity="1.00">без аппроксимации</text>
   </g>
   <g>
-    <rect x="70.0" y="344.0" width="164.0" height="58.0" rx="14" fill="#16211e" stroke="#3a4740"/>
-    <rect x="70.0" y="344.0" width="5" height="58.0" rx="2.5" fill="#a6dec0"/>
-    <text x="88.0" y="369.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="600" text-anchor="start" letter-spacing="1.20" opacity="1.00">CFG BRANCH</text>
-    <text x="88.0" y="398.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="22" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">2,993 → 0,297 с</text>
+    <rect x="70.0" y="330.0" width="164.0" height="62.0" rx="14" fill="#16211e" stroke="#3a4740"/>
+    <rect x="70.0" y="330.0" width="5" height="62.0" rx="2.5" fill="#a6dec0"/>
+    <text x="88.0" y="354.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="600" text-anchor="start" letter-spacing="1.20" opacity="1.00">CFG BRANCH</text>
+    <text x="88.0" y="381.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="21" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">2,993 → 0,297 с</text>
   </g>
   <g>
-    <rect x="246.0" y="344.0" width="150.0" height="58.0" rx="14" fill="#16211e" stroke="#3a4740"/>
-    <rect x="246.0" y="344.0" width="5" height="58.0" rx="2.5" fill="#7fb2cf"/>
-    <text x="264.0" y="369.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="600" text-anchor="start" letter-spacing="1.20" opacity="1.00">KERNELS</text>
-    <text x="264.0" y="398.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="22" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">6 · sm_80</text>
+    <rect x="246.0" y="330.0" width="150.0" height="62.0" rx="14" fill="#16211e" stroke="#3a4740"/>
+    <rect x="246.0" y="330.0" width="5" height="62.0" rx="2.5" fill="#7fb2cf"/>
+    <text x="264.0" y="354.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="600" text-anchor="start" letter-spacing="1.20" opacity="1.00">KERNELS</text>
+    <text x="264.0" y="381.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="21" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">6 · sm_80</text>
   </g>
   <g>
-    <rect x="408.0" y="344.0" width="150.0" height="58.0" rx="14" fill="#16211e" stroke="#3a4740"/>
-    <rect x="408.0" y="344.0" width="5" height="58.0" rx="2.5" fill="#e3b57d"/>
-    <text x="426.0" y="369.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="600" text-anchor="start" letter-spacing="1.20" opacity="1.00">TUNED SOLVER</text>
-    <text x="426.0" y="398.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="22" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">50 → 4 NFE</text>
+    <rect x="408.0" y="330.0" width="150.0" height="62.0" rx="14" fill="#16211e" stroke="#3a4740"/>
+    <rect x="408.0" y="330.0" width="5" height="62.0" rx="2.5" fill="#e3b57d"/>
+    <text x="426.0" y="354.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="600" text-anchor="start" letter-spacing="1.20" opacity="1.00">TUNED SOLVER</text>
+    <text x="426.0" y="381.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="21" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">50 → 4 NFE</text>
   </g>
   <g>
-    <rect x="570.0" y="344.0" width="176.0" height="58.0" rx="14" fill="#16211e" stroke="#3a4740"/>
-    <rect x="570.0" y="344.0" width="5" height="58.0" rx="2.5" fill="#d99079"/>
-    <text x="588.0" y="369.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="600" text-anchor="start" letter-spacing="1.20" opacity="1.00">STACK</text>
-    <text x="588.0" y="398.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="22" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">PyTorch · Triton</text>
+    <rect x="570.0" y="330.0" width="176.0" height="62.0" rx="14" fill="#16211e" stroke="#3a4740"/>
+    <rect x="570.0" y="330.0" width="5" height="62.0" rx="2.5" fill="#d99079"/>
+    <text x="588.0" y="354.0" fill="#b3c1b8" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="600" text-anchor="start" letter-spacing="1.20" opacity="1.00">STACK</text>
+    <text x="588.0" y="381.0" fill="#f3eee0" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="21" font-weight="700" text-anchor="start" letter-spacing="0.00" opacity="1.00">PyTorch · Triton</text>
   </g>
   <text x="1128.0" y="86.0" fill="#718376" font-family="DejaVu Sans, Arial, Helvetica, sans-serif" font-size="12" font-weight="700" text-anchor="end" letter-spacing="2.00" opacity="1.00">CASE STUDY</text>
 
